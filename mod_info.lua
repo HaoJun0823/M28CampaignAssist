@@ -1,0 +1,16 @@
+name = "M28CampaignAssist"
+uid = "m28campaignassist-v1-4b7c-8e12-9a53-2f6d08c1e7b4"
+version = 2
+copyright = "CC BY-NC-SA 4.0"
+description = "M28AI companion, campaign only. Enables M28AI's combined AI/human armies (per-unit, manual takeover of your own units) in single-player campaigns, where the game rebuilds ScenarioInfo.Options and drops all lobby game options. Units are never taken over by default; you toggle each unit yourself. Requires M28AI v328 enabled; harmless no-op otherwise. Skirmish and multiplayer behaviour is never touched."
+author = "StarQi"
+url = ""
+selectable = true
+enabled = true
+exclusive = false
+ui_only = false
+requires = { }
+requiresNames = { }
+conflicts = { }
+before = { }
+after = { "fnewm028-v328-55b4-92b6-64398e7ge43f" }
