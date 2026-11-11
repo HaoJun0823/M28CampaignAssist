@@ -1,8 +1,8 @@
 name = "M28CampaignAssist"
 uid = "m28campaignassist-v1-4b7c-8e12-9a53-2f6d08c1e7b4"
-version = 6
+version = 7
 copyright = "CC BY-NC-SA 4.0"
-description = "M28AI companion, campaign only. Enables M28AI's combined AI/human armies (per-unit, manual takeover of your own units) in single-player campaigns, where the game rebuilds ScenarioInfo.Options and drops all lobby game options. Also enforces AI-inherit at the engine event level so units built by a taken-over factory/engineer really do inherit the takeover (M28AI's own propagation is unreliable on the retail build). Units are never taken over until you toggle them. v6 focuses on aggression and survivability: lower enemy-threat valuation, no dodge/hover micro, more unit variety, original fast order cycle, no kiting for your land combat units, and a guard that stops M28AI from ctrl-King your mobile units (engineer/unit-cap/island cleanup). No unit or factory caps. Requires M28AI v328 enabled; harmless no-op otherwise. Skirmish and multiplayer behaviour is never touched."
+description = "M28AI companion, campaign only. Enables M28AI's combined AI/human armies (per-unit, manual takeover of your own units) in single-player campaigns, where the game rebuilds ScenarioInfo.Options and drops all lobby game options. Also enforces AI-inherit at the engine event level so units built by a taken-over factory/engineer really do inherit the takeover (M28AI's own propagation is unreliable on the retail build). Units are never taken over until you toggle them. v7 focuses on aggression: lower enemy-threat valuation, no dodge/hover micro, more unit variety, original fast order cycle, and no kiting for your land combat units so they press the attack. M28AI keeps full control of its own housekeeping, including destroying surplus units; no unit or factory caps are applied. Requires M28AI v328 enabled; harmless no-op otherwise. Skirmish and multiplayer behaviour is never touched."
 author = "StarQi"
 url = ""
 selectable = true

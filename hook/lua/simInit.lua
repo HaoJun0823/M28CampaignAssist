@@ -58,9 +58,6 @@ local tM28AssistDefaults = {
     --    1 = 玩家单位不再风筝后退，贴上去打（更敢换血）
     --    2 = 保留 M28 原版风筝行为
     M28AssistNoKite = 1,
-    -- 6) 是否拦截 M28AI 对玩家单位/工厂/电厂/矿点的 ctrl-K（自爆、废弃）：
-    --    1 = 拦截（默认），2 = 放行（保持 M28AI 原版行为）
-    M28AssistBlockSelfDestruct = 1,
 }
 
 local function ApplyM28AssistOptions()
