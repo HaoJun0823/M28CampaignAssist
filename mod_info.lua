@@ -1,8 +1,8 @@
 name = "M28CampaignAssist"
 uid = "m28campaignassist-v1-4b7c-8e12-9a53-2f6d08c1e7b4"
-version = 2
+version = 5
 copyright = "CC BY-NC-SA 4.0"
-description = "M28AI companion, campaign only. Enables M28AI's combined AI/human armies (per-unit, manual takeover of your own units) in single-player campaigns, where the game rebuilds ScenarioInfo.Options and drops all lobby game options. Units are never taken over by default; you toggle each unit yourself. Requires M28AI v328 enabled; harmless no-op otherwise. Skirmish and multiplayer behaviour is never touched."
+description = "M28AI companion, campaign only. Enables M28AI's combined AI/human armies (per-unit, manual takeover of your own units) in single-player campaigns, where the game rebuilds ScenarioInfo.Options and drops all lobby game options. Also enforces AI-inherit at the engine event level so units built by a taken-over factory/engineer really do inherit the takeover (M28AI's own propagation is unreliable on the retail build). Units are never taken over until you toggle them. v5 adds campaign behaviour tuning: more willing engagements, no dodge/hover micro, more unit variety, slower target re-evaluation, plus a human-only engineer cap (20 total / 8 T1) and factory cap (10) enforced by hooking two M28AI functions without editing its source. Requires M28AI v328 enabled; harmless no-op otherwise. Skirmish and multiplayer behaviour is never touched."
 author = "StarQi"
 url = ""
 selectable = true

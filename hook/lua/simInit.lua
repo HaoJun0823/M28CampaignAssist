@@ -12,10 +12,16 @@
 --   登记成 M28 brain，也不给单位打 M28CombinedArmiesShowUI 标记，
 --   结果既没有托管、也没有 UI 按钮。
 --
--- 做法：只在 type == 'campaign' 的 session、且字段缺失时补 1（= Yes，逐单位切换）。
---       * 值 1 打开的是「按钮」，不是「托管」：每个人类单位默认 M28Active = 0，
---         即默认不被 M28 接管，必须手动点亮才交出去
---       * M28CAInherit 未设置时缺省按 2 处理，所以新造单位也不会自动继承托管
+-- 做法：只在 type == 'campaign' 的 session、且字段缺失时写入下表这些值。
+--       * M28CombinedArmy = 1 打开的是「按钮」，不是「托管」：每个人类单位默认
+--         M28Active = 0，必须手动点亮才交出去
+--       * M28CAInherit = 1 打开「传染」：被托管单位造出来的单位继承托管状态。
+--         M28 里只有两处读它，且都要求父/建造单位的 M28Active 为真：
+--           - M28Events.lua:2149（工程师造建筑）
+--           - M28Events.lua:3789（单位已完全建成且 oUnit.Parent.M28Active）
+--         缺省不设时按 2（关闭）处理，所以默认没有任何继承
+--       * 光补选项还不够：M28 那两处传播逻辑在零售版战役里不可靠（见
+--         hook/lua/sim/Unit.lua 的说明），真正的传染由那个 hook 在引擎事件层面完成。
 --       * 不覆盖大厅/剧本已经设过的值
 --       * 不写 CampAI 等其他选项，战役默认 AI 仍保持原版行为
 --
@@ -29,10 +35,28 @@
 --      Sim::Create() 崩溃、进不去游戏。
 --      所以包装函数一律用具名参数。
 
-local refOptionKey = 'M28CombinedArmy'
-local iCombinedArmyEnabled = 1   -- 1 = Yes (toggle for all units)
+-- 要补的选项。键是 ScenarioInfo.Options 的键，值是写入的数字（M28 侧用数值比较）。
+local tM28AssistDefaults = {
+    M28CombinedArmy = 1,   -- 1 = Yes (toggle for all units)
+    M28CAInherit = 1,      -- 1 = Yes (被托管单位造出的单位继承托管)
 
-local function ApplyM28CombinedArmyOption()
+    -- 行为调参（全部是 M28AI 已有的运行时选项，这里只是补上战役缺失的值）
+    -- 1) 攻击更积极：0.75 会低估敌方威胁，从而更愿意用地面部队交战。
+    --    代价：核弹目标判定会变粗（M28 官方 help 已说明）。
+    M28Aggression = 0.75,
+    -- 2) 关闭闪避位移与空中悬停微操：止住“反复闪避/躲藏”。
+    --    注意这两个选项是 bUseKeyAsValueInScenarioInfo，必须写数字，写字符串会静默失效。
+    M28DodgeMicro = 2,
+    M28HoverMicro = 2,
+    -- 3) 关闭“固定优先造某几种单位”：提高单位多样性，也削弱单一阵营权重。
+    M28PrioritiseBPs = 2,
+    -- 4) 降低重评估频率（11 tick -> 16 tick）：减少反复切目标和补移动命令。
+    --    说明：高单位数时 M28 的 ConsiderSlowdownForHighUnitCount 会把周期钳回 11 tick，
+    --    所以这条在后期可能被上游逻辑覆盖，属于已知限制。
+    M28TimeBetweenOrders = 1.5,
+}
+
+local function ApplyM28AssistOptions()
     -- rawget 绕开严格的全局 __index：未定义时安静返回 nil，不抛错
     local scenarioInfo = rawget(_G, 'ScenarioInfo')
     if type(scenarioInfo) ~= 'table' then return end
@@ -43,13 +67,14 @@ local function ApplyM28CombinedArmyOption()
     -- 只处理单人战役。遭遇战/多人由大厅决定，tutorial 等其它 session 也不插手
     if scenarioInfo.type ~= 'campaign' then return end
 
-    -- 已经有人设过值就不动，避免覆盖玩家的显式选择
-    if options[refOptionKey] ~= nil then return end
-
-    options[refOptionKey] = iCombinedArmyEnabled
-    LOG('M28CampaignAssist: set ScenarioInfo.Options.' .. refOptionKey .. '='
-        .. iCombinedArmyEnabled .. ' for scenario type='
-        .. tostring(scenarioInfo.type))
+    for sKey, vValue in pairs(tM28AssistDefaults) do
+        -- 已经有人设过值就不动，避免覆盖玩家的显式选择
+        if options[sKey] == nil then
+            options[sKey] = vValue
+            LOG('M28CampaignAssist: set ScenarioInfo.Options.' .. sKey .. '='
+                .. tostring(vValue) .. ' for scenario type=' .. tostring(scenarioInfo.type))
+        end
+    end
 end
 
 -- SetupSession：引擎在「ScenarioInfo 已就绪、军队尚未创建」时调用它，
@@ -58,7 +83,7 @@ local M28AssistOldSetupSession = rawget(_G, 'SetupSession')
 if type(M28AssistOldSetupSession) == 'function' then
     function SetupSession()
         local result = M28AssistOldSetupSession()
-        ApplyM28CombinedArmyOption()
+        ApplyM28AssistOptions()
         return result
     end
 end
@@ -68,7 +93,7 @@ end
 local M28AssistOldOnCreateArmyBrain = rawget(_G, 'OnCreateArmyBrain')
 if type(M28AssistOldOnCreateArmyBrain) == 'function' then
     function OnCreateArmyBrain(index, brain, name, nickname)
-        ApplyM28CombinedArmyOption()
+        ApplyM28AssistOptions()
         return M28AssistOldOnCreateArmyBrain(index, brain, name, nickname)
     end
 end
@@ -77,7 +102,7 @@ end
 local M28AssistOldBeginSession = rawget(_G, 'BeginSession')
 if type(M28AssistOldBeginSession) == 'function' then
     function BeginSession()
-        ApplyM28CombinedArmyOption()
+        ApplyM28AssistOptions()
         return M28AssistOldBeginSession()
     end
 end

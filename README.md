@@ -27,7 +27,10 @@ M28AI then reads a missing option, falls back to `tonumber(... or 2)` — which 
 *disabled* — and consequently neither shows the toggle button nor registers your brain as an
 M28 brain. The feature is effectively dead in campaign, no matter that the mod is loaded.
 
-This mod fills that single field with `1` in campaign sessions, before M28AI reads it.
+This mod fills `M28CombinedArmy = 1`, `M28CAInherit = 1` and five behaviour options in campaign
+sessions, before M28AI reads them, and adds a `hook/lua/sim/Unit.lua` hook that actually
+propagates the takeover flag to newly built units (see below). Two further wrappers cap
+engineer and factory production for the human player only.
 
 ## Requirements
 
@@ -44,8 +47,19 @@ This mod fills that single field with `1` in campaign sessions, before M28AI rea
 2. Enable **both** `M28AI` and `M28CampaignAssist` in the in-game mod manager.
 3. Start a campaign mission. Nothing else to configure.
 
-The mod ships no units, no blueprints and no `lua/` files — only a single
-`hook/lua/simInit.lua`.
+The mod ships no units, no blueprints and no `lua/` files. It adds five hook files:
+
+| File | Purpose |
+|---|---|
+| `hook/lua/simInit.lua` | injects the campaign-only game options |
+| `hook/lua/SimCallbacks.lua` | records your manual per-unit toggle |
+| `hook/lua/sim/Unit.lua` | propagates the takeover to newly built units |
+| `hook/mods/M28AI/lua/AI/M28Factory.lua` | caps engineer production |
+| `hook/mods/M28AI/lua/AI/M28Conditions.lua` | caps total factory count |
+
+The two `hook/mods/M28AI/...` files are appended to M28AI's own files by the engine's
+`SCR_LuaDoFileConcat`. They do not copy or modify M28AI's source; they wrap two functions
+after M28AI has defined them.
 
 ## Usage
 
@@ -54,17 +68,128 @@ The mod ships no units, no blueprints and no `lua/` files — only a single
 3. In the unit order panel, the alternate order slot shows an M28 "charge" icon.
 4. Click it to hand that unit to M28AI; click again to take it back.
 
-Every unit starts **not** taken over. Units built afterwards do not inherit it either, because
-`M28CAInherit` is unset and M28AI therefore treats it as `2`.
+Every unit starts **not** taken over. Once you toggle a unit on, units it builds inherit the
+takeover: an engineer builds a factory, the factory is taken over, and the units it produces
+are taken over too. Click the icon on any of them to take it back.
+
+`M28Active` is a shared field that M28AI writes from several places: your toggle
+(`SimCallbacks.lua`), its own inheritance logic (`M28Events.lua:2150`, `OnConstructionStarted`),
+`OnCreate` (which clears only the UI stat), and a few dynamic switches for transports, walls
+and upgrade components. Those inheritance paths are forked threads, so deciding each unit's
+state **once** from an event means whoever runs last wins. That is why earlier versions looked
+randomly broken: some units inherited the takeover and some did not, depending purely on thread
+order.
+
+This addon therefore keeps its **own authoritative state** and continuously projects it back,
+so event order stops mattering:
+
+- `hook/lua/SimCallbacks.lua` wraps M28AI's toggle callback. Clicking the button records an
+  explicit player intent in `unit.M28AssistManaged` and marks the unit as `Explicit`. Nothing
+  downstream is allowed to override a decision you made by hand.
+- `hook/lua/sim/Unit.lua` records the builder in `OnStartBuild` (excluding `Repair`), then
+  resolves a new unit's authoritative state once it can see the builder (`OnStartBuild` record,
+  falling back to the engine's `.Parent`). While the unit is still under construction it keeps
+  following the builder, so toggling the builder mid-build updates the result too; on
+  completion the unit's state is final and can be toggled independently.
+- A **single** reconciler thread re-projects the authoritative state onto `M28Active`, the
+  `M28Active` UI stat and `M28CombinedArmiesShowUI`. Any write M28AI makes at any time —
+  including `OnCreate` clearing the stat — is corrected on the next pass. This is what removes
+  the race entirely.
+- Units with no builder (ACU, mission-spawned or gifted units) are deliberately left to
+  M28AI's default: not taken over. A fallback in the reconciler still recognises a manual
+  toggle if the callback hook ever fails to attach.
+
+### Thread and stall safety (v5)
+
+Earlier versions forked a short-lived resolver thread for *every* unit and kept a registry that
+only grew. A 31-minute session logged `tracked=3328` while only `713` units were alive, so most
+of each pass was spent walking dead slots. v5 removes that growth:
+
+- New units join a **pending queue** handled by the same single thread; there is exactly one
+  `ForkThread` in the whole mod. No concurrent writer can race the authoritative field.
+- Dead registry slots are recycled, so pass cost tracks live units instead of lifetime units.
+- The pass slows from 1 s to 3 s when nothing has changed for several rounds, and the
+  `M28CombinedArmiesShowUI` stat is checked less often.
+- One `pcall` isolates each unit and another protects the whole pass, so a bad unit cannot
+  kill the only thread. A watchdog restarts the thread if it stops beating, and a generation
+  counter makes the old thread exit instead of leaving two writers. An idle thread exits
+  entirely and is relaunched by the next build action (also covers save/load).
+- Outside campaign sessions the hooks do nothing at all.
+
+### Behaviour tuning (v5)
+
+The campaign `Options` table is missing the lobby options that control M28AI's play style.
+`simInit.lua` fills five of them with values tuned for a more active, less repetitive campaign
+bot. All five are read by M28AI at runtime, so they take effect without touching its code.
+
+| Option | Value | Effect | Cost |
+|---|---|---|---|
+| `M28Aggression` | `0.75` | underestimates enemy threat, so units are more willing to engage | nuclear targeting becomes coarser (M28AI's own help says so) |
+| `M28DodgeMicro` | `2` | disables dodge displacement entirely — stops units twitching away from slow shells | units eat slow projectiles instead of dodging |
+| `M28HoverMicro` | `2` | disables air hover micro | air units no longer slow down for micro |
+| `M28PrioritiseBPs` | `2` | stops M28AI forcing the same "strong" units (bricks/percies/etc.); more unit and faction variety | loses some of M28AI's hand-tuned unit matchups |
+| `M28TimeBetweenOrders` | `1.5` | re-evaluates land orders every 16 ticks instead of 11, and disables the interim "move the blocker" order | weaker kiting; note M28AI clamps the cycle back to 11 ticks once the game has more than 1750 units, so this mainly helps early and mid game |
+
+Two behaviours have no lobby option, so they are capped by small wrappers:
+
+- **Engineer cap** (`hook/mods/M28AI/lua/AI/M28Factory.lua`). Wraps
+  `AdjustBlueprintForOverrides`, the final gate every factory passes through. If the blueprint
+  M28AI picked is an engineer and the player already has enough, the wrapper returns `nil`;
+  M28AI then falls through to its next build condition and the factory produces a combat unit
+  instead of going idle. Only `BrainType == 'Human'` is affected; campaign enemies keep their
+  original behaviour. Defaults: **20 engineers total, 8 of them T1**.
+  Override in `ScenarioInfo.Options` with `M28AssistEngiCap` / `M28AssistEngiT1Cap`.
+- **Factory cap** (`hook/mods/M28AI/lua/AI/M28Conditions.lua`). Wraps `WantMoreFactories`, the
+  function every land/air/naval/ACU factory-construction path asks first. Above the cap it
+  returns `false`, so no *new* factories are started; existing factories keep producing. It
+  counts the human player's completed factories through the engine
+  (`GetCurrentUnits(refCategoryFactory)`), cached for one second. Default: **10 factories**.
+  Override with `M28AssistFactoryCap`. Calls that pass `bIgnoreMainEcoConditions` (experimental
+  and ACU special paths) are never blocked.
+
+Why these two wrappers are safe to keep across M28AI upgrades: the engine concatenates them onto
+M28AI's files, and M28AI's module system uses a live environment table (`lua/system/import.lua`
+builds `env`, then `doscript(name, env)`), so redefining the function after the original
+definition is visible to every caller. The wrappers depend on two function names
+(`AdjustBlueprintForOverrides`, `WantMoreFactories`) and one category
+(`refCategoryEngineer` / `refCategoryFactory`). If a future M28AI renames them, the wrapper
+simply stops applying — it does not corrupt the file. Look for the `hook installed` lines in
+`game.log` to confirm both attached.
+
+### Companion patch to M28AI (optional, already applied locally)
+
+`ActiveShieldMonitor` in `M28AI/lua/AI/M28Engineer.lua` loops every tick. When a predefined
+shield location cannot be built on, it called `M28Utilities.ErrorHandler` on **every** pass
+(which runs `pcall(assert, false, ...)` and prints a full stack trace), and repeatedly
+destroyed its own blocking buildings trying to clear the spot. One session logged the warning
+counter reaching `10000`, starving the single sim thread — engineers then look idle and the
+game appears to hang.
+
+Five small edits, all tagged `[M28Assist deadlock guard]`, add a consecutive-failure counter:
+log throttling to once per 10 s, backoff from every tick to 3 s then 10 s, a stop to the
+self-demolition after 10 failures, and an immediate return to normal speed on any pass that
+did not fail. Nothing is permanently disabled; a later success resets the counter.
+
+The unmodified v328 file is saved at
+`_trash/M28AI-v328-M28Engineer-pre-deadlock-fix.lua`. To revert, copy it back over
+`mods/M28AI/lua/AI/M28Engineer.lua`. This patch is **not** part of the addon folder — the
+addon itself still ships only the three hook files.
 
 ## What it does NOT do
 
 - Does **not** set `CampAI`, so campaign allies and enemies stay on the stock campaign AI.
 - Does **not** touch skirmish or multiplayer. The value is injected only when
   `ScenarioInfo.type == 'campaign'`, and never overwrites a value that is already set.
-- Does **not** modify M28AI's source. It is a separate mod that writes one field M28AI reads.
+- Does **not** require any M28AI source change to work. It writes game options M28AI reads
+  and adds its own engine hook. A separate, optional stall-guard patch to
+  `M28AI/lua/AI/M28Engineer.lua` is described above; it is applied directly to the local
+  M28AI install and is not shipped inside this addon.
 - Does **not** take over anything automatically. The option enables the *button*; each unit's
   `M28Active` flag still defaults to `0`.
+- Does **not** affect campaign enemies. The engineer and factory caps check
+  `BrainType == 'Human'` (or a human brain on the team) before doing anything.
+- Does **not** destroy existing units or factories. Both caps only stop *new* production; what
+  you already have keeps working.
 
 ## Known log messages
 
@@ -85,9 +210,35 @@ Search `game.log` for:
 
 ```
 M28CampaignAssist: set ScenarioInfo.Options.M28CombinedArmy=1 for scenario type=campaign
+M28CampaignAssist: set ScenarioInfo.Options.M28CAInherit=1 for scenario type=campaign
+M28CampaignAssist: toggle callback hooked
+M28CampaignAssist: reconcile thread started (generation 1)
+M28CampaignAssist: reconcile round=1 slots=... alive=... pending=... fixed=... quiet=0
+M28CampaignAssist: toggle Enable=true applied to 1 unit(s)
+M28CampaignAssist: inherit <unit id> <- <builder id> managed=true (builderManaged=true, builderActive=true, builderHuman=true)
+M28CampaignAssist: engineer cap hook installed (default total=20, t1=8)
+M28CampaignAssist: factory cap hook installed (default cap=12)
+M28CampaignAssist: engineer gate closed total=20/20 t1=8/8
+M28CampaignAssist: factory cap reached total=12/12 (no new factories; existing ones keep producing)
 Running M28BrainCreated for brain <your player name>
 Human player brain <your player name> created; Index=...
 ```
+
+What to check:
+
+- `toggle callback hooked` must be present. If it says `Callbacks table unavailable`, the
+  reconciler's fallback is handling manual toggles instead — still functional, but tell the
+  maintainer.
+- `reconcile round=...` heartbeats (first round, then every 30 passes) prove the projection
+  thread is alive. `slots` should track the number of live units rather than grow forever,
+  `pending` should fall back to 0 quickly, `quiet` shows the backoff state, and `fixed` counts
+  corrections for that pass — it should be small and settle near zero.
+- `reconcile thread stalled, restarting` means the watchdog fired. Once is harmless; repeated
+  lines point at an exception that needs the log detail.
+- `toggle Enable=...` confirms the click reached the sim side and how many units it changed.
+- `inherit ... managed=` shows each new unit's decision together with the builder's
+  authoritative value, raw `M28Active` and whether the builder is a human unit. The first 200
+  decisions are logged.
 
 Then confirm M28AI's `SteamAIIssue` notice — *"M28AI mod is active, but no AI have been selected
 that use M28AI"* — no longer appears.
@@ -102,6 +253,8 @@ been tested with it.
 ## License and credits
 
 Released under **CC BY-NC-SA 4.0**, the same license as M28AI. No M28AI source code is copied
-here; this mod only writes a game option that M28AI reads.
+into this addon; it only writes game options and adds its own engine hooks. The optional
+stall-guard edits applied to the local M28AI install remain M28AI's own file and are covered
+by M28AI's license.
 
 M28AI is by [maudlin27](https://github.com/maudlin27/M28AI).
