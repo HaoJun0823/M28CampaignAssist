@@ -1,7 +1,22 @@
 -- M28CampaignAssist（M28AI 附属 mod）
--- hook/lua/sim/Unit.lua  -- v5
+-- hook/lua/sim/Unit.lua  -- v9
 --
 -- 目标：让「逐单位托管」像基因一样由建造者传给产物，并且按钮永远反映真实状态。
+--
+-- ============ v9：为什么「建造中的工厂，完工后托管自己关了」 ============
+-- v4 起有一条「兜底」分支：当 M28Active 与 UI stat 一致、却与权威值不符时，
+-- 把它当成玩家手动 toggle 并定案。它假设「只有玩家 toggle 才会同时写这两个值」，
+-- 这个假设是错的：M28AI 自己的代码路径也会让两者同时呈现 false/0
+-- （M28Events.OnCreate 的 else 分支对玩家单位把 stat 写 0；工厂在完工那一刻
+-- 恰好从「建造中」变成「已完工」，正是兜底条件里 IsComplete 开始成立的第一刻）。
+-- 于是刚建好的工厂被判定成「玩家关掉了托管」，定案为 false 并写了 Explicit，
+-- 之后对账就一直忠实地把它维持成关闭 —— 表现就是建造期间开着、完工即熄灭。
+-- 日志侧的证据：整局所有 toggle 记录都是 Enable=true，玩家从未点过关闭。
+-- 修法：玩家的真实意图只认 SimCallbacks 捕获的那一次点击。该回调挂载成功时
+-- 会写 _G.M28AssistToggleHooked，本文件随即彻底关闭状态反推；只有回调缺失
+-- （M28AI 改名等）时才退回兜底，作为「至少能点」的最后手段。
+-- 同版本另加：ScenarioInfo.Options 若在战役中途被整表重建导致 M28CombinedArmy
+-- 丢失，对账会自愈补回，否则整轮对账被跳过、所有已托管单位的按钮都会失守。
 --
 -- ============ v4 为什么会「有的能继承、有的不行」 ============
 -- v3 把状态判成一次性事件：解析线程写一次 oUnit.M28Active = true/false 就结束。
@@ -76,6 +91,23 @@ local function M28AssistLog(sText)
     LOG('M28CampaignAssist: ' .. sText)
 end
 
+-- 诊断日志：只在排查「托管自己关掉」时有用，限流避免刷爆日志。
+local iM28AssistDiagUsed = 0
+local iM28AssistDiagMax = 40
+
+local function M28AssistDiag(sText)
+    if iM28AssistDiagUsed >= iM28AssistDiagMax then return end
+    iM28AssistDiagUsed = iM28AssistDiagUsed + 1
+    M28AssistLog(sText)
+end
+
+local function M28AssistFraction(oUnit)
+    if not oUnit or not oUnit.GetFractionComplete then return -1 end
+    local bOK, fValue = pcall(oUnit.GetFractionComplete, oUnit)
+    if not bOK or type(fValue) ~= 'number' then return -1 end
+    return fValue
+end
+
 local function M28AssistNow()
     local fnNow = rawget(_G, 'GetGameTimeSeconds')
     if type(fnNow) ~= 'function' then return 0 end
@@ -84,13 +116,33 @@ local function M28AssistNow()
     return tNow
 end
 
+local bM28AssistOptionSeen = false
+local bM28AssistOptionLostLogged = false
+
 local function M28AssistInheritEnabled()
     local scenarioInfo = rawget(_G, 'ScenarioInfo')
     if type(scenarioInfo) ~= 'table' or scenarioInfo.type ~= 'campaign' then return false end
     local options = scenarioInfo.Options
     if type(options) ~= 'table' then return false end
     -- 只认选项 1（逐单位手动托管）。3 / 4 是 MOBA / SimCity，由 M28AI 全权处理。
-    return tonumber(options.M28CombinedArmy or 2) == 1
+    if tonumber(options.M28CombinedArmy or 2) == 1 then
+        bM28AssistOptionSeen = true
+        return true
+    end
+
+    -- 战役进行中 ScenarioInfo.Options 有可能被整表重建（换任务阶段、读档后回到战役），
+    -- 那样 M28CombinedArmy 会消失，整轮对账被跳过：已托管单位不再被投影，
+    -- M28AI 一旦把 stat 清零，按钮就永久显示成「关」。
+    -- 开局注入过这个键、之后又消失，说明是被重置而不是玩家改的，这里补回来。
+    if bM28AssistOptionSeen then
+        options.M28CombinedArmy = 1
+        if not bM28AssistOptionLostLogged then
+            bM28AssistOptionLostLogged = true
+            M28AssistLog('M28CombinedArmy vanished mid-game; restored to 1')
+        end
+        return true
+    end
+    return false
 end
 
 local function M28AssistIsAlive(oUnit)
@@ -118,6 +170,17 @@ local function M28AssistUnitLabel(oUnit)
         if bp and bp.BlueprintId then return tostring(bp.BlueprintId) end
     end
     return '?'
+end
+
+-- 仅用于诊断日志分流：工厂的「完工」时刻是这次排查的重点。
+local function M28AssistIsFactory(oUnit)
+    if not oUnit or not oUnit.UnitId then return false end
+    local tCategories = rawget(_G, 'categories')
+    local fnContains = rawget(_G, 'EntityCategoryContains')
+    if type(tCategories) ~= 'table' or type(fnContains) ~= 'function' then return false end
+    if tCategories.FACTORY == nil then return false end
+    local bOK, bValue = pcall(fnContains, tCategories.FACTORY, oUnit.UnitId)
+    return bOK and bValue == true
 end
 
 -- 读 UI stat。返回数字，读不到返回 nil（此时对账会无条件补写）。
@@ -202,34 +265,73 @@ end
 
 -- 单位级对账：先处理「跟随建造者」，再处理玩家意图兜底，最后投影。
 local function M28AssistReconcileUnit(oUnit, bCheckShow)
+    local bComplete = M28AssistIsComplete(oUnit)
+
     -- 建造期间跟随建造者：玩家如果在施工中途改了建造者的托管状态，
     -- 产物会跟着改；完工即定案。显式 toggle 过的单位永远不跟随。
+    --
+    -- v9：只跟随「有权威值」的建造者。建造者本身未定案（ACU、剧本生成、
+    -- 解析超时）时，它的 M28Active 全是 M28AI 自己的临时标记 —— 临时赋权、
+    -- 运输机装载、微操都会把它来回改写。以前跟着这种值走，产物就会在施工
+    -- 期间跟着翻，完工那一刻翻到 false 就永久定案成关闭，看起来就是
+    -- 「建造时开着、建完自己关了」。起点已经在解析时取过一次，这里不再重读。
     if oUnit.M28AssistFollow and oUnit.M28AssistBuilder
         and not oUnit.M28AssistExplicit then
         local oBuilder = oUnit.M28AssistBuilder
-        if M28AssistIsAlive(oBuilder) and not M28AssistIsComplete(oUnit) then
-            oUnit.M28AssistManaged = M28AssistGetManaged(oBuilder)
+        if M28AssistIsAlive(oBuilder) and not bComplete then
+            if oBuilder.M28AssistManaged ~= nil then
+                local bFollow = (oBuilder.M28AssistManaged == true)
+                if bFollow ~= (oUnit.M28AssistManaged == true) then
+                    M28AssistDiag('follow ' .. M28AssistUnitLabel(oUnit)
+                        .. ' <- ' .. M28AssistUnitLabel(oBuilder)
+                        .. ' managed ' .. tostring(oUnit.M28AssistManaged)
+                        .. ' -> ' .. tostring(bFollow))
+                    oUnit.M28AssistManaged = bFollow
+                end
+            end
         else
+            -- 完工 / 建造者消失：定格。这是工厂「建造完毕」唯一会经过的代码，
+            -- 记一条状态快照，用来核对完工瞬间 M28Active 与 stat 到底是什么。
+            if M28AssistIsFactory(oUnit) then
+                M28AssistDiag('factory finished ' .. M28AssistUnitLabel(oUnit)
+                    .. ' managed=' .. tostring(oUnit.M28AssistManaged)
+                    .. ' active=' .. tostring(oUnit.M28Active or false)
+                    .. ' stat=' .. tostring(M28AssistReadStat(oUnit, 'M28Active'))
+                    .. ' frac=' .. tostring(M28AssistFraction(oUnit)))
+            end
             oUnit.M28AssistFollow = false
             oUnit.M28AssistBuilder = nil
         end
     end
 
-    -- 兜底：万一 SimCallbacks hook 没挂上，也要能认出玩家手动 toggle，
-    -- 否则对账会把玩家刚点亮或熄灭的单位改回去。
-    -- 判据：sim 字段与 UI stat 一致（toggle 会同时写两者），却与权威值不符，
-    -- 且单位已完工（排除 M28AI 在建造开始时打上的继承标记）。
-    if oUnit.M28AssistManaged ~= nil and not oUnit.M28AssistExplicit then
+    -- 兜底：只在「玩家 toggle 回调不可用」时启用。
+    -- 回调可用时这条路径必须关闭：M28AI 自己在单位创建时会写 stat（M28Events.OnCreate
+    -- 的 else 分支把 M28Active 写 0），被运输机装载、装箱等时机也会改这两个值。
+    -- 这些写入和「玩家点了关闭」在数据上完全一样，从状态反推必然误判 ——
+    -- 之前正是它把刚建好的工厂定案成「玩家关掉了托管」。
+    -- 玩家的真实意图只认 SimCallbacks 捕获的那一次点击。
+    if oUnit.M28AssistManaged ~= nil and not oUnit.M28AssistExplicit
+        and rawget(_G, 'M28AssistToggleHooked') ~= true then
         local bSim = (oUnit.M28Active == true)
         local iStat = M28AssistReadStat(oUnit, 'M28Active')
         if iStat ~= nil and (iStat ~= 0) == bSim
             and bSim ~= (oUnit.M28AssistManaged == true)
-            and M28AssistIsComplete(oUnit) then
+            and bComplete then
+            M28AssistDiag('adopt external toggle ' .. M28AssistUnitLabel(oUnit)
+                .. ' managed ' .. tostring(oUnit.M28AssistManaged) .. ' -> ' .. tostring(bSim))
             oUnit.M28AssistManaged = bSim
             oUnit.M28AssistExplicit = true
             oUnit.M28AssistFollow = false
             oUnit.M28AssistBuilder = nil
         end
+    end
+
+    -- 诊断：托管值说「开」，M28Active 却不是 true —— 有人绕过对账改了字段。
+    if oUnit.M28AssistManaged == true and oUnit.M28Active ~= true then
+        M28AssistDiag('external clear ' .. M28AssistUnitLabel(oUnit)
+            .. ' active=' .. tostring(oUnit.M28Active or false)
+            .. ' stat=' .. tostring(M28AssistReadStat(oUnit, 'M28Active'))
+            .. ' frac=' .. tostring(M28AssistFraction(oUnit)))
     end
 
     -- 未定案单位数量很少，每轮都查按钮可见性；已定案的按低频全量查。

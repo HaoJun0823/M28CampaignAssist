@@ -46,6 +46,9 @@ if bM28AssistGotCallbacks and type(tM28AssistCallbacks) == 'table' then
             LOG('M28CampaignAssist: toggle Enable=' .. tostring(data.Enable)
                 .. ' applied to ' .. tostring(iCount) .. ' unit(s)')
         end
+        -- 告诉 hook/lua/sim/Unit.lua：玩家意图现在有可靠来源了。
+        -- 有这条通路时，对账绝不能再从 M28Active/stat 反推玩家意图（见那边的注释）。
+        rawset(_G, 'M28AssistToggleHooked', true)
         LOG('M28CampaignAssist: toggle callback hooked')
     else
         LOG('M28CampaignAssist: M28SharedArmiesCallback not found; relying on reconcile fallback')

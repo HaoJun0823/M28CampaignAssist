@@ -100,8 +100,37 @@ so event order stops mattering:
   including `OnCreate` clearing the stat — is corrected on the next pass. This is what removes
   the race entirely.
 - Units with no builder (ACU, mission-spawned or gifted units) are deliberately left to
-  M28AI's default: not taken over. A fallback in the reconciler still recognises a manual
-  toggle if the callback hook ever fails to attach.
+  M28AI's default: not taken over. A fallback in the reconciler recognises a manual toggle
+  **only** when the callback hook failed to attach (v9); otherwise player intent comes from
+  the click alone.
+
+### Why a factory looked taken over while building and off once finished (v9)
+
+Earlier versions carried a fallback that inferred "the player toggled this" from unit state:
+if `M28Active` and the `M28Active` stat agreed with each other but disagreed with the
+authoritative value, the reconciler adopted that as a manual toggle. The assumption — that
+only a player click writes both values together — was wrong. M28AI's own `OnCreate` clears
+the stat (`M28Events.lua:3796`) for player units, and a factory switches from "under
+construction" to "complete" at exactly the moment the fallback's `IsComplete` guard starts
+passing. The result was a factory that showed as taken over throughout construction and
+switched itself off the moment it finished: the reconciler concluded you had turned it off,
+finalised that as `Explicit = true`, and then dutifully kept it off forever.
+
+The game log confirmed it: every `toggle` line in the session was `Enable=true`; no player
+ever turned anything off.
+
+v9 fixes this by refusing to infer intent from state at all:
+
+- `SimCallbacks.lua` sets `_G.M28AssistToggleHooked` once its wrapper is attached. While
+  that flag is set, the reconciler **never** re-derives the authoritative value; only a
+  click changes it. The state-sniffing fallback survives purely as a last resort for a
+  future M28AI build that renames the callback.
+- If `ScenarioInfo.Options` gets rebuilt mid-campaign and `M28CombinedArmy` disappears, the
+  reconciler now restores it (`M28CombinedArmy vanished mid-game; restored to 1`) instead of
+  skipping every pass — which previously left all taken-over units unprojected.
+- Temporary diagnostics were added for this class of bug: `factory finished ...`,
+  `external clear ...`, `follow ... managed true -> false` and `adopt external toggle ...`.
+  Each is capped at 40 lines per session, so they cost nothing once the issue is gone.
 
 ### Thread and stall safety (v5)
 
@@ -240,19 +269,37 @@ Human player brain <your player name> created; Index=...
 
 What to check:
 
-- `toggle callback hooked` must be present. If it says `Callbacks table unavailable`, the
-  reconciler's fallback is handling manual toggles instead — still functional, but tell the
-  maintainer.
+- `toggle callback hooked` must be present. It also switches the reconciler into
+  "player intent comes from clicks only" mode, so this line is what keeps a finished factory
+  from being mistaken for a manual shutdown. If it says `Callbacks table unavailable`, the
+  state-sniffing fallback takes over instead — still usable, but report it.
+- `M28CombinedArmy vanished mid-game; restored to 1` means the campaign rebuilt
+  `ScenarioInfo.Options` mid-session and the addon put the key back. Harmless, expected once
+  per rebuild; without it every taken-over unit would silently stop being projected.
 - `reconcile round=...` heartbeats (first round, then every 30 passes) prove the projection
   thread is alive. `slots` should track the number of live units rather than grow forever,
   `pending` should fall back to 0 quickly, `quiet` shows the backoff state, and `fixed` counts
-  corrections for that pass — it should be small and settle near zero.
+  corrections for that pass — it should be small and settle near zero. A `fixed` count that
+  stays high means something keeps rewriting units behind the reconciler.
 - `reconcile thread stalled, restarting` means the watchdog fired. Once is harmless; repeated
   lines point at an exception that needs the log detail.
 - `toggle Enable=...` confirms the click reached the sim side and how many units it changed.
+  Every line here should be `Enable=true` unless you actually clicked units off; an
+  `Enable=false` you did not cause is a bug.
 - `inherit ... managed=` shows each new unit's decision together with the builder's
   authoritative value, raw `M28Active` and whether the builder is a human unit. The first 200
   decisions are logged.
+- v9 diagnostics, each capped at 40 lines per session:
+  - `factory finished <id> managed=... active=... stat=... frac=...` — snapshot taken the
+    moment a factory stops following its builder. This is the state the old fallback used to
+    misread.
+  - `external clear <id> active=... stat=...` — a unit is authoritative "on" but `M28Active`
+    is not `true`, so something rewrote the field behind the reconciler.
+  - `follow <id> <- <builder> managed X -> Y` — a unit's state changed because its builder
+    changed; every entry here is a real change of intent on the builder.
+  - `adopt external toggle <id> managed X -> Y` — the fallback path fired. It should only
+    ever appear when `toggle callback hooked` is **absent**; if both lines show up, the
+    callback is being bypassed and that needs investigating.
 - The three behaviour lines (`retreat micro disabled`, `target stickiness enabled`,
   `build variety reroll active`) are printed **once each, on first hit**. Their presence only
   proves the wrapper attached and matched at least one unit — it says nothing about how many
