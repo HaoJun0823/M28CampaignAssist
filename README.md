@@ -28,10 +28,11 @@ M28AI then reads a missing option, falls back to `tonumber(... or 2)` — which 
 M28 brain. The feature is effectively dead in campaign, no matter that the mod is loaded.
 
 This mod fills `M28CombinedArmy = 1`, `M28CAInherit = 1` and five behaviour options in campaign
-sessions, before M28AI reads them, and adds a `hook/lua/sim/Unit.lua` hook that actually
-propagates the takeover flag to newly built units (see below). Two further wrappers cap
-engineer and factory production for the human player only; their limits live in the same table
-in `simInit.lua` (`M28AssistEngiCap`, `M28AssistEngiT1Cap`, `M28AssistFactoryCap`).
+sessions, before M28AI reads them, and adds hooks that propagate the takeover flag to newly
+built units (see below). Two further wrappers stop M28AI from ctrl-King the player's own units
+and production/economy assets, and from kiting with the player's land combat units. **No unit or
+factory caps are applied** — production quantity is left to M28AI; the wrappers only change
+*how* units behave once they exist.
 
 ## Requirements
 
@@ -55,8 +56,8 @@ The mod ships no units, no blueprints and no `lua/` files. It adds five hook fil
 | `hook/lua/simInit.lua` | injects the campaign-only game options |
 | `hook/lua/SimCallbacks.lua` | records your manual per-unit toggle |
 | `hook/lua/sim/Unit.lua` | propagates the takeover to newly built units |
-| `hook/mods/M28AI/lua/AI/M28Factory.lua` | caps engineer production |
-| `hook/mods/M28AI/lua/AI/M28Conditions.lua` | caps total factory count |
+| `hook/mods/M28AI/lua/AI/M28Orders.lua` | blocks M28AI's ctrl-K of the player's mobile units |
+| `hook/mods/M28AI/lua/AI/M28UnitInfo.lua` | disables kiting for the player's land combat units |
 
 The two `hook/mods/M28AI/...` files are appended to M28AI's own files by the engine's
 `SCR_LuaDoFileConcat`. They do not copy or modify M28AI's source; they wrap two functions
@@ -117,46 +118,48 @@ of each pass was spent walking dead slots. v5 removes that growth:
   entirely and is relaunched by the next build action (also covers save/load).
 - Outside campaign sessions the hooks do nothing at all.
 
-### Behaviour tuning (v5)
+### Behaviour tuning (v6)
 
 The campaign `Options` table is missing the lobby options that control M28AI's play style.
-`simInit.lua` fills five of them with values tuned for a more active, less repetitive campaign
-bot. All five are read by M28AI at runtime, so they take effect without touching its code.
+`simInit.lua` fills five of them with values tuned for a more active, less survival-obsessed
+campaign bot. All five are read by M28AI at runtime, so they take effect without touching its
+code.
 
 | Option | Value | Effect | Cost |
 |---|---|---|---|
-| `M28Aggression` | `0.75` | underestimates enemy threat, so units are more willing to engage | nuclear targeting becomes coarser (M28AI's own help says so) |
+| `M28Aggression` | `0.6` | strongly underestimates enemy threat, so units commit to engagements and push instead of backing off | nuclear targeting becomes coarser (M28AI's own help says so) |
 | `M28DodgeMicro` | `2` | disables dodge displacement entirely — stops units twitching away from slow shells | units eat slow projectiles instead of dodging |
 | `M28HoverMicro` | `2` | disables air hover micro | air units no longer slow down for micro |
 | `M28PrioritiseBPs` | `2` | stops M28AI forcing the same "strong" units (bricks/percies/etc.); more unit and faction variety | loses some of M28AI's hand-tuned unit matchups |
-| `M28TimeBetweenOrders` | `1.5` | re-evaluates land orders every 16 ticks instead of 11, and disables the interim "move the blocker" order | weaker kiting; note M28AI clamps the cycle back to 11 ticks once the game has more than 1750 units, so this mainly helps early and mid game |
+| `M28TimeBetweenOrders` | `1.0` | keeps the original 11-tick land cycle, so orders react quickly | target re-evaluation is a little busier than at `1.5` |
 
-Two behaviours have no lobby option, so they are capped by small wrappers:
+Two behaviours have no lobby option, so they are handled by small wrappers:
 
-- **Engineer cap** (`hook/mods/M28AI/lua/AI/M28Factory.lua`). Wraps
-  `AdjustBlueprintForOverrides`, the final gate every factory passes through. If the blueprint
-  M28AI picked is an engineer and the player already has enough, the wrapper returns `nil`;
-  M28AI then falls through to its next build condition and the factory produces a combat unit
-  instead of going idle. Only `BrainType == 'Human'` is affected; campaign enemies keep their
-  original behaviour. Defaults: **20 engineers total, 8 of them T1**.
-  Change `M28AssistEngiCap` / `M28AssistEngiT1Cap` in the `simInit.lua` table (set `999` to
-  disable the cap).
-- **Factory cap** (`hook/mods/M28AI/lua/AI/M28Conditions.lua`). Wraps `WantMoreFactories`, the
-  function every land/air/naval/ACU factory-construction path asks first. Above the cap it
-  returns `false`, so no *new* factories are started; existing factories keep producing. It
-  counts the human player's completed factories through the engine
-  (`GetCurrentUnits(refCategoryFactory)`), cached for one second. Default: **10 factories**.
-  Change `M28AssistFactoryCap` in the `simInit.lua` table (set `999` to disable the cap). Calls
-  that pass `bIgnoreMainEcoConditions` (experimental and ACU special paths) are never blocked.
+- **Self-destruct guard** (`hook/mods/M28AI/lua/AI/M28Orders.lua`). M28AI destroys its own units
+  in several places: engineers when it thinks there are too many (`M28Economy.lua`), low-value
+  units near the population cap (`M28Overseer.lua`), stranded island units (`M28Land.lua`), air
+  units that cannot get home (`M28Micro.lua`), and even factories "for mass" (`M28Factory.lua`).
+  Every one of those paths ends in `M28Orders.IssueTrackedKillUnit`. The wrapper refuses that
+  call for the player's **mobile units, factories, power generators and mass extractors** in a
+  campaign, so nothing of yours self-destructs. Obsolete radar, failed shields, walls and
+  blocking buildings are still cleaned up by M28AI, because that is normal upgrade housekeeping
+  and blocking it could jam a factory exit. Set `M28AssistBlockSelfDestruct = 2` to turn the
+  guard off.
+- **No kiting** (`hook/mods/M28AI/lua/AI/M28UnitInfo.lua`). M28AI marks each unit with
+  `refbCanKite` inside `RecordUnitRange`; the land AI reads it to choose between "kite backwards"
+  and "press the attack". The wrapper clears that flag for the player's **land combat units**, so
+  they close in and use manual-attack/attack-move instead of reversing out of enemy range. Air,
+  navy, MAA, engineers and experimentals are untouched. Set `M28AssistNoKite = 2` to restore
+  M28AI's original kiting.
 
-Why these two wrappers are safe to keep across M28AI upgrades: the engine concatenates them onto
+Why these wrappers are safe to keep across M28AI upgrades: the engine concatenates them onto
 M28AI's files, and M28AI's module system uses a live environment table (`lua/system/import.lua`
 builds `env`, then `doscript(name, env)`), so redefining the function after the original
 definition is visible to every caller. The wrappers depend on two function names
-(`AdjustBlueprintForOverrides`, `WantMoreFactories`) and one category
-(`refCategoryEngineer` / `refCategoryFactory`). If a future M28AI renames them, the wrapper
-simply stops applying — it does not corrupt the file. Look for the `hook installed` lines in
-`game.log` to confirm both attached.
+(`IssueTrackedKillUnit`, `RecordUnitRange`) and two category constants
+(`categories.MOBILE`, `refCategoryLandCombat`). If a future M28AI renames them, the wrapper
+simply stops applying — it does not corrupt the file. Look for the `guard installed` and
+`kiting disabled` lines in `game.log` to confirm they attached.
 
 ### Companion patch to M28AI (optional, already applied locally)
 
@@ -175,7 +178,7 @@ did not fail. Nothing is permanently disabled; a later success resets the counte
 The unmodified v328 file is saved at
 `_trash/M28AI-v328-M28Engineer-pre-deadlock-fix.lua`. To revert, copy it back over
 `mods/M28AI/lua/AI/M28Engineer.lua`. This patch is **not** part of the addon folder — the
-addon itself still ships only the three hook files.
+addon itself ships only its own five hook files.
 
 ## What it does NOT do
 
@@ -188,10 +191,12 @@ addon itself still ships only the three hook files.
   M28AI install and is not shipped inside this addon.
 - Does **not** take over anything automatically. The option enables the *button*; each unit's
   `M28Active` flag still defaults to `0`.
-- Does **not** affect campaign enemies. The engineer and factory caps check
-  `BrainType == 'Human'` (or a human brain on the team) before doing anything.
-- Does **not** destroy existing units or factories. Both caps only stop *new* production; what
-  you already have keeps working.
+- Does **not** affect campaign enemies. Every wrapper checks `BrainType == 'Human'` (or a human
+  brain on the team) before doing anything.
+- Does **not** cap unit or factory production any more. v6 removed the engineer and factory
+  caps entirely; only behaviour (kiting, self-destruction) is changed.
+- Does **not** destroy existing units or factories. The self-destruct guard only *prevents*
+  M28AI from destroying the player's mobile units.
 
 ## Known log messages
 
@@ -213,15 +218,15 @@ Search `game.log` for:
 ```
 M28CampaignAssist: set ScenarioInfo.Options.M28CombinedArmy=1 for scenario type=campaign
 M28CampaignAssist: set ScenarioInfo.Options.M28CAInherit=1 for scenario type=campaign
+M28CampaignAssist: set ScenarioInfo.Options.M28Aggression=0.6 for scenario type=campaign
 M28CampaignAssist: toggle callback hooked
 M28CampaignAssist: reconcile thread started (generation 1)
 M28CampaignAssist: reconcile round=1 slots=... alive=... pending=... fixed=... quiet=0
 M28CampaignAssist: toggle Enable=true applied to 1 unit(s)
 M28CampaignAssist: inherit <unit id> <- <builder id> managed=true (builderManaged=true, builderActive=true, builderHuman=true)
-M28CampaignAssist: engineer cap hook installed (default total=20, t1=8)
-M28CampaignAssist: factory cap hook installed (default cap=12)
-M28CampaignAssist: engineer gate closed total=20/20 t1=8/8
-M28CampaignAssist: factory cap reached total=12/12 (no new factories; existing ones keep producing)
+M28CampaignAssist: self-destruct guard installed (human campaign units/factories/power/mex are never ctrl-Ked)
+M28CampaignAssist: kiting disabled for human campaign land combat units
+M28CampaignAssist: blocked M28 self-destruct of <unit id> (asset kept alive, blocked so far=1)
 Running M28BrainCreated for brain <your player name>
 Human player brain <your player name> created; Index=...
 ```

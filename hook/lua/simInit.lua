@@ -41,25 +41,26 @@ local tM28AssistDefaults = {
     M28CAInherit = 1,      -- 1 = Yes (被托管单位造出的单位继承托管)
 
     -- 行为调参（全部是 M28AI 已有的运行时选项，这里只是补上战役缺失的值）
-    -- 1) 攻击更积极：0.75 会低估敌方威胁，从而更愿意用地面部队交战。
-    --    代价：核弹目标判定会变粗（M28 官方 help 已说明）。
-    M28Aggression = 0.75,
+    -- 1) 攻击更积极：0.6 会明显低估敌方威胁，从而更愿意用地面部队交战、更敢推进。
+    --    代价：核弹目标判定会变粗（M28 官方 help 已说明）。想稳一点改 0.7。
+    M28Aggression = 0.6,
     -- 2) 关闭闪避位移与空中悬停微操：止住“反复闪避/躲藏”。
     --    注意这两个选项是 bUseKeyAsValueInScenarioInfo，必须写数字，写字符串会静默失效。
     M28DodgeMicro = 2,
     M28HoverMicro = 2,
     -- 3) 关闭“固定优先造某几种单位”：提高单位多样性，也削弱单一阵营权重。
     M28PrioritiseBPs = 2,
-    -- 4) 降低重评估频率（11 tick -> 16 tick）：减少反复切目标和补移动命令。
-    --    说明：高单位数时 M28 的 ConsiderSlowdownForHighUnitCount 会把周期钳回 11 tick，
-    --    所以这条在后期可能被上游逻辑覆盖，属于已知限制。
-    M28TimeBetweenOrders = 1.5,
+    -- 4) 保持 1.0 的重评估周期（11 tick）：更跟得上战场，减少“发呆”。
+    --    写 1.5 会让决策慢下来，之前用来压切目标频率，但副作用是反应迟钝。
+    M28TimeBetweenOrders = 1.0,
 
-    -- 两个数量闸口的可调值（由 hook/mods/M28AI 下的两个包装读取）。
-    -- 想放松就把数字调大，想关闭就设成 999。
-    M28AssistEngiCap = 20,      -- 玩家总工程师上限
-    M28AssistEngiT1Cap = 8,     -- 其中 T1 工程师上限
-    M28AssistFactoryCap = 10,   -- 玩家工厂总数上限
+    -- 5) 本 mod 自己的开关（不是 M28AI 的选项，由 hook/mods/M28AI 下的包装读取）：
+    --    1 = 玩家单位不再风筝后退，贴上去打（更敢换血）
+    --    2 = 保留 M28 原版风筝行为
+    M28AssistNoKite = 1,
+    -- 6) 是否拦截 M28AI 对玩家单位/工厂/电厂/矿点的 ctrl-K（自爆、废弃）：
+    --    1 = 拦截（默认），2 = 放行（保持 M28AI 原版行为）
+    M28AssistBlockSelfDestruct = 1,
 }
 
 local function ApplyM28AssistOptions()
