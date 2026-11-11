@@ -29,10 +29,11 @@ M28 brain. The feature is effectively dead in campaign, no matter that the mod i
 
 This mod fills `M28CombinedArmy = 1`, `M28CAInherit = 1` and five behaviour options in campaign
 sessions, before M28AI reads them, and adds hooks that propagate the takeover flag to newly
-built units (see below). One further wrapper stops M28AI from kiting with the player's land
-combat units. **No unit or factory caps are applied**, and M28AI keeps its own housekeeping —
-including destroying units it considers surplus. The wrappers only change *how* units behave
-once they exist.
+built units (see below). Three further wrappers shape combat behaviour: the player's land
+combat units no longer back away mid-fight, they stop swapping targets every half second, and
+factories avoid rebuilding the same unit over and over. **No unit or factory caps are applied**,
+and M28AI keeps its own housekeeping — including destroying units it considers surplus. The
+wrappers only change *how* units behave once they exist.
 
 ## Requirements
 
@@ -49,17 +50,19 @@ once they exist.
 2. Enable **both** `M28AI` and `M28CampaignAssist` in the in-game mod manager.
 3. Start a campaign mission. Nothing else to configure.
 
-The mod ships no units, no blueprints and no `lua/` files. It adds four hook files:
+The mod ships no units, no blueprints and no `lua/` files. It adds six hook files:
 
 | File | Purpose |
 |---|---|
 | `hook/lua/simInit.lua` | injects the campaign-only game options |
 | `hook/lua/SimCallbacks.lua` | records your manual per-unit toggle |
 | `hook/lua/sim/Unit.lua` | propagates the takeover to newly built units |
-| `hook/mods/M28AI/lua/AI/M28UnitInfo.lua` | disables kiting for the player's land combat units |
+| `hook/mods/M28AI/lua/AI/M28Land.lua` | stops the player's land combat units from backing away |
+| `hook/mods/M28AI/lua/AI/M28Orders.lua` | keeps a locked target for a few seconds |
+| `hook/mods/M28AI/lua/AI/M28Factory.lua` | rerolls repeated picks when a factory builds a unit |
 
-The two `hook/mods/M28AI/...` files are appended to M28AI's own files by the engine's
-`SCR_LuaDoFileConcat`. They do not copy or modify M28AI's source; they wrap two functions
+The three `hook/mods/M28AI/...` files are appended to M28AI's own files by the engine's
+`SCR_LuaDoFileConcat`. They do not copy or modify M28AI's source; they wrap three functions
 after M28AI has defined them.
 
 ## Usage
@@ -117,7 +120,7 @@ of each pass was spent walking dead slots. v5 removes that growth:
   entirely and is relaunched by the next build action (also covers save/load).
 - Outside campaign sessions the hooks do nothing at all.
 
-### Behaviour tuning (v7)
+### Behaviour tuning (v8)
 
 The campaign `Options` table is missing the lobby options that control M28AI's play style.
 `simInit.lua` fills five of them with values tuned for a more active, less survival-obsessed
@@ -132,14 +135,36 @@ code.
 | `M28PrioritiseBPs` | `2` | stops M28AI forcing the same "strong" units (bricks/percies/etc.); more unit and faction variety | loses some of M28AI's hand-tuned unit matchups |
 | `M28TimeBetweenOrders` | `1.0` | keeps the original 11-tick land cycle, so orders react quickly | target re-evaluation is a little busier than at `1.5` |
 
-One behaviour has no lobby option, so it is handled by a small wrapper:
+Three behaviours have no lobby option, so each is handled by a small wrapper. All three apply
+only to the player's brain (`BrainType == 'Human'`) and only in campaign sessions; skirmish,
+multiplayer and every AI brain are untouched.
 
-- **No kiting** (`hook/mods/M28AI/lua/AI/M28UnitInfo.lua`). M28AI marks each unit with
-  `refbCanKite` inside `RecordUnitRange`; the land AI reads it to choose between "kite backwards"
-  and "press the attack". The wrapper clears that flag for the player's **land combat units**, so
-  they close in and use manual-attack/attack-move instead of reversing out of enemy range. Air,
-  navy, MAA, engineers, ACU/SACU and experimentals are untouched. Set `M28AssistNoKite = 2` to
-  restore M28AI's original kiting.
+- **No backing off** (`hook/mods/M28AI/lua/AI/M28Land.lua`). M28AI calls
+  `BackupUnitTowardsRallyIfAvailable` to shuffle a unit a dozen metres backwards before it
+  re-engages. The wrapper returns immediately for the player's land combat units, so they hold
+  their ground and keep firing instead of stepping back.
+
+  This deliberately does **not** touch `refbCanKite`. That flag means "this weapon can fire
+  while moving" — it is false only for weapons that unpack and for the GC/Megalith, whose guns
+  are fixed to the body. A dozen other branches read it to tell mobile units apart from
+  stationary ones, so clearing it stopped the retreat but also made M28AI treat ordinary tanks
+  like turrets. Set `M28AssistNoKite = 2` to restore the retreat.
+
+- **Target stickiness** (`hook/mods/M28AI/lua/AI/M28Orders.lua`). M28AI re-evaluates targets
+  roughly every half second, and every switch clears the unit's order queue — a unit can walk
+  halfway to one enemy, turn around, and walk back. The wrapper pins the first target for 8
+  seconds: while it is still alive and within 120 units of the shooter, later switches are
+  rewritten to the pinned target. It releases on its own when the timer expires, the target
+  dies, or the target runs off. Set `M28AssistStickyTarget = 2` to disable.
+
+- **Build variety** (`hook/mods/M28AI/lua/AI/M28Factory.lua`).
+  `GetBlueprintThatCanBuildOfCategory` already picks at random from its candidate list, but
+  random still repeats. The wrapper remembers each factory's last three picks and rerolls once
+  when the new pick matches either of the previous two, or when three picks in a row came from
+  the same faction (judged by the first two characters of the unit id). Rerolling happens only in
+  the plain "pick something to build" mode — the slowest/fastest/cheapest/most-expensive queries
+  pass through untouched, because a reroll would break their "single best answer" meaning. Set
+  `M28AssistBuildVariety = 2` to disable.
 
 M28AI's own housekeeping is deliberately left alone. It still culls engineers when mass stalls
 (`M28Economy.lua`), clears low-value units near the population cap (`M28Overseer.lua`), removes
@@ -147,51 +172,38 @@ stranded island units (`M28Land.lua`) and scattered air units (`M28Micro.lua`), 
 factory for mass (`M28Factory.lua`). All of those are part of how its economy stays afloat, so
 this addon neither blocks them nor adds a cap of its own.
 
-Why the wrapper is safe to keep across M28AI upgrades: the engine concatenates it onto M28AI's
-file, and M28AI's module system uses a live environment table (`lua/system/import.lua` builds
-`env`, then `doscript(name, env)`), so redefining the function after the original definition is
-visible to every caller. The wrapper depends on one function name (`RecordUnitRange`) and one
-category constant (`refCategoryLandCombat`). If a future M28AI renames them, the wrapper simply
-stops applying — it does not corrupt the file. Look for the `kiting disabled` line in `game.log`
-to confirm it attached.
+Why the wrappers are safe to keep across M28AI upgrades: the engine concatenates them onto
+M28AI's files, and M28AI's module system uses a live environment table
+(`lua/system/import.lua` builds `env`, then `doscript(name, env)`), so redefining a function
+after the original definition is visible to every caller. Each wrapper depends on a small, named
+contract: `BackupUnitTowardsRallyIfAvailable`, `IssueTrackedAttack` and
+`GetBlueprintThatCanBuildOfCategory`, plus the `refCategoryLandCombat` constant. If a future
+M28AI renames one of them, that wrapper simply stops applying — it does not corrupt the file.
+Look for the `retreat micro disabled`, `target stickiness enabled` and `build variety reroll`
+lines in `game.log` to confirm they attached.
 
-### Companion patch to M28AI (optional, already applied locally)
+### M28AI's own files are never edited
 
-`ActiveShieldMonitor` in `M28AI/lua/AI/M28Engineer.lua` loops every tick. When a predefined
-shield location cannot be built on, it called `M28Utilities.ErrorHandler` on **every** pass
-(which runs `pcall(assert, false, ...)` and prints a full stack trace), and repeatedly
-destroyed its own blocking buildings trying to clear the spot. One session logged the warning
-counter reaching `10000`, starving the single sim thread — engineers then look idle and the
-game appears to hang.
-
-Five small edits, all tagged `[M28Assist deadlock guard]`, add a consecutive-failure counter:
-log throttling to once per 10 s, backoff from every tick to 3 s then 10 s, a stop to the
-self-demolition after 10 failures, and an immediate return to normal speed on any pass that
-did not fail. Nothing is permanently disabled; a later success resets the counter.
-
-The unmodified v328 file is saved at
-`_trash/M28AI-v328-M28Engineer-pre-deadlock-fix.lua`. To revert, copy it back over
-`mods/M28AI/lua/AI/M28Engineer.lua`. This patch is **not** part of the addon folder — the
-addon itself ships only its own four hook files.
+Earlier versions carried a local, hand-applied stall-guard patch to
+`M28AI/lua/AI/M28Engineer.lua`. It has been reverted: the installed M28AI is byte-identical to
+the official v328 release, and everything this addon does now lives in its own `hook/` tree.
 
 ## What it does NOT do
 
 - Does **not** set `CampAI`, so campaign allies and enemies stay on the stock campaign AI.
 - Does **not** touch skirmish or multiplayer. The value is injected only when
   `ScenarioInfo.type == 'campaign'`, and never overwrites a value that is already set.
-- Does **not** require any M28AI source change to work. It writes game options M28AI reads
-  and adds its own engine hook. A separate, optional stall-guard patch to
-  `M28AI/lua/AI/M28Engineer.lua` is described above; it is applied directly to the local
-  M28AI install and is not shipped inside this addon.
+- Does **not** require any M28AI source change to work. It writes game options M28AI reads and
+  appends its own hook files; the installed M28AI is the official v328 release, byte for byte.
 - Does **not** take over anything automatically. The option enables the *button*; each unit's
   `M28Active` flag still defaults to `0`.
-- Does **not** affect campaign enemies. The kiting wrapper checks `BrainType == 'Human'` before
-  doing anything.
-- Does **not** cap unit or factory production. v6 removed the engineer and factory caps entirely,
-  and v7 removed the self-destruct guard as well: M28AI is free to cull its own surplus, exactly
-  as it does in skirmish.
-- Does **not** destroy anything itself. The only behaviour wrapper left (no-kiting) changes unit
-  orders; it never kills or removes a unit.
+- Does **not** affect campaign enemies. Every wrapper checks `BrainType == 'Human'` before doing
+  anything.
+- Does **not** cap unit or factory production. v6 removed the engineer and factory caps
+  entirely, and v7 removed the self-destruct guard as well: M28AI is free to cull its own
+  surplus, exactly as it does in skirmish.
+- Does **not** destroy anything itself. The behaviour wrappers change unit orders and factory
+  picks; they never kill or remove a unit.
 
 ## Known log messages
 
@@ -219,7 +231,9 @@ M28CampaignAssist: reconcile thread started (generation 1)
 M28CampaignAssist: reconcile round=1 slots=... alive=... pending=... fixed=... quiet=0
 M28CampaignAssist: toggle Enable=true applied to 1 unit(s)
 M28CampaignAssist: inherit <unit id> <- <builder id> managed=true (builderManaged=true, builderActive=true, builderHuman=true)
-M28CampaignAssist: kiting disabled for human campaign land combat units
+M28CampaignAssist: retreat micro disabled for human campaign land combat units
+M28CampaignAssist: target stickiness enabled for human campaign land combat units
+M28CampaignAssist: build variety reroll active for human campaign factories
 Running M28BrainCreated for brain <your player name>
 Human player brain <your player name> created; Index=...
 ```
@@ -253,8 +267,7 @@ been tested with it.
 ## License and credits
 
 Released under **CC BY-NC-SA 4.0**, the same license as M28AI. No M28AI source code is copied
-into this addon; it only writes game options and adds its own engine hooks. The optional
-stall-guard edits applied to the local M28AI install remain M28AI's own file and are covered
-by M28AI's license.
+into this addon; it only writes game options and adds its own engine hooks. The installed
+M28AI is unmodified and remains covered by M28AI's license.
 
 M28AI is by [maudlin27](https://github.com/maudlin27/M28AI).
