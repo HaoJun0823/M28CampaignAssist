@@ -54,6 +54,12 @@ local tM28AssistDefaults = {
     --    说明：高单位数时 M28 的 ConsiderSlowdownForHighUnitCount 会把周期钳回 11 tick，
     --    所以这条在后期可能被上游逻辑覆盖，属于已知限制。
     M28TimeBetweenOrders = 1.5,
+
+    -- 两个数量闸口的可调值（由 hook/mods/M28AI 下的两个包装读取）。
+    -- 想放松就把数字调大，想关闭就设成 999。
+    M28AssistEngiCap = 20,      -- 玩家总工程师上限
+    M28AssistEngiT1Cap = 8,     -- 其中 T1 工程师上限
+    M28AssistFactoryCap = 10,   -- 玩家工厂总数上限
 }
 
 local function ApplyM28AssistOptions()

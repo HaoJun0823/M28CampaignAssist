@@ -30,7 +30,8 @@ M28 brain. The feature is effectively dead in campaign, no matter that the mod i
 This mod fills `M28CombinedArmy = 1`, `M28CAInherit = 1` and five behaviour options in campaign
 sessions, before M28AI reads them, and adds a `hook/lua/sim/Unit.lua` hook that actually
 propagates the takeover flag to newly built units (see below). Two further wrappers cap
-engineer and factory production for the human player only.
+engineer and factory production for the human player only; their limits live in the same table
+in `simInit.lua` (`M28AssistEngiCap`, `M28AssistEngiT1Cap`, `M28AssistFactoryCap`).
 
 ## Requirements
 
@@ -138,14 +139,15 @@ Two behaviours have no lobby option, so they are capped by small wrappers:
   M28AI then falls through to its next build condition and the factory produces a combat unit
   instead of going idle. Only `BrainType == 'Human'` is affected; campaign enemies keep their
   original behaviour. Defaults: **20 engineers total, 8 of them T1**.
-  Override in `ScenarioInfo.Options` with `M28AssistEngiCap` / `M28AssistEngiT1Cap`.
+  Change `M28AssistEngiCap` / `M28AssistEngiT1Cap` in the `simInit.lua` table (set `999` to
+  disable the cap).
 - **Factory cap** (`hook/mods/M28AI/lua/AI/M28Conditions.lua`). Wraps `WantMoreFactories`, the
   function every land/air/naval/ACU factory-construction path asks first. Above the cap it
   returns `false`, so no *new* factories are started; existing factories keep producing. It
   counts the human player's completed factories through the engine
   (`GetCurrentUnits(refCategoryFactory)`), cached for one second. Default: **10 factories**.
-  Override with `M28AssistFactoryCap`. Calls that pass `bIgnoreMainEcoConditions` (experimental
-  and ACU special paths) are never blocked.
+  Change `M28AssistFactoryCap` in the `simInit.lua` table (set `999` to disable the cap). Calls
+  that pass `bIgnoreMainEcoConditions` (experimental and ACU special paths) are never blocked.
 
 Why these two wrappers are safe to keep across M28AI upgrades: the engine concatenates them onto
 M28AI's files, and M28AI's module system uses a live environment table (`lua/system/import.lua`
