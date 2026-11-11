@@ -29,9 +29,10 @@ M28 brain. The feature is effectively dead in campaign, no matter that the mod i
 
 This mod fills `M28CombinedArmy = 1`, `M28CAInherit = 1` and five behaviour options in campaign
 sessions, before M28AI reads them, and adds hooks that propagate the takeover flag to newly
-built units (see below). Three further wrappers shape combat behaviour: the player's land
-combat units no longer back away mid-fight, they stop swapping targets every half second, and
-factories avoid rebuilding the same unit over and over. **No unit or factory caps are applied**,
+built units (see below). Four wrappers shape combat behaviour: the player's land combat units no
+longer back away mid-fight, they stop swapping targets every half second, groups of experimentals
+spread their fire instead of all shelling the same enemy, and factories avoid rebuilding the same
+unit over and over. **No unit or factory caps are applied**,
 and M28AI keeps its own housekeeping — including destroying units it considers surplus. The
 wrappers only change *how* units behave once they exist.
 
@@ -58,7 +59,7 @@ The mod ships no units, no blueprints and no `lua/` files. It adds six hook file
 | `hook/lua/SimCallbacks.lua` | records your manual per-unit toggle |
 | `hook/lua/sim/Unit.lua` | propagates the takeover to newly built units |
 | `hook/mods/M28AI/lua/AI/M28Land.lua` | stops the player's land combat units from backing away |
-| `hook/mods/M28AI/lua/AI/M28Orders.lua` | keeps a locked target for a few seconds |
+| `hook/mods/M28AI/lua/AI/M28Orders.lua` | keeps a locked target, and spreads experimental fire |
 | `hook/mods/M28AI/lua/AI/M28Factory.lua` | rerolls repeated picks when a factory builds a unit |
 
 The three `hook/mods/M28AI/...` files are appended to M28AI's own files by the engine's
@@ -164,7 +165,7 @@ code.
 | `M28PrioritiseBPs` | `2` | stops M28AI forcing the same "strong" units (bricks/percies/etc.); more unit and faction variety | loses some of M28AI's hand-tuned unit matchups |
 | `M28TimeBetweenOrders` | `1.0` | keeps the original 11-tick land cycle, so orders react quickly | target re-evaluation is a little busier than at `1.5` |
 
-Three behaviours have no lobby option, so each is handled by a small wrapper. All three apply
+Four behaviours have no lobby option, so each is handled by a small wrapper. All of them apply
 only to the player's brain (`BrainType == 'Human'`) and only in campaign sessions; skirmish,
 multiplayer and every AI brain are untouched.
 
@@ -182,9 +183,24 @@ multiplayer and every AI brain are untouched.
 - **Target stickiness** (`hook/mods/M28AI/lua/AI/M28Orders.lua`). M28AI re-evaluates targets
   roughly every half second, and every switch clears the unit's order queue — a unit can walk
   halfway to one enemy, turn around, and walk back. The wrapper pins the first target for 8
-  seconds: while it is still alive and within 120 units of the shooter, later switches are
-  rewritten to the pinned target. It releases on its own when the timer expires, the target
-  dies, or the target runs off. Set `M28AssistStickyTarget = 2` to disable.
+  seconds (12 for experimentals, which take longer to reposition): while it is still alive and
+  within 120 units of the shooter, later switches are rewritten to the pinned target. It releases
+  on its own when the timer expires, the target dies, or the target runs off. Enemy ACUs, SACUs,
+  experimentals and T3 structures punch through the pin: if one of those becomes the new target,
+  the switch is allowed immediately. Set `M28AssistStickyTarget = 2` to disable.
+
+- **Fire spreading** (`hook/mods/M28AI/lua/AI/M28Orders.lua`). M28AI picks targets per unit with
+  no notion of who else is already shooting at what, so a group of experimentals all converge on
+  the same enemy and most of that firepower is wasted on a target that dies in a second. The
+  wrapper records, on each enemy unit, which taken-over experimentals have requested it in the
+  last 6 seconds. Once a target has 3 of them, any further experimental asks for a different
+  enemy within its own weapon range + 20 (clamped to 40–120), preferring the least-contested one
+  and then the closest. If nothing else is nearby it keeps the original target — concentrating
+  is still better than idling. The chosen alternative is pinned for 8 seconds so the unit does
+  not oscillate between candidates, and the same high-value targets (ACU/SACU/experimental/T3
+  structure) are exempt from the quota so a priority kill still gets full weight. Only
+  experimentals are affected; ordinary units keep M28AI's focus-fire behaviour. Set
+  `M28AssistSpreadTarget = 2` to disable.
 
 - **Build variety** (`hook/mods/M28AI/lua/AI/M28Factory.lua`).
   `GetBlueprintThatCanBuildOfCategory` already picks at random from its candidate list, but
@@ -262,6 +278,7 @@ M28CampaignAssist: toggle Enable=true applied to 1 unit(s)
 M28CampaignAssist: inherit <unit id> <- <builder id> managed=true (builderManaged=true, builderActive=true, builderHuman=true)
 M28CampaignAssist: retreat micro disabled for human campaign land combat units
 M28CampaignAssist: target stickiness enabled for human campaign land combat units
+M28CampaignAssist: experimental fire spreading enabled (quota 3 per target)
 M28CampaignAssist: build variety reroll active for human campaign factories
 Running M28BrainCreated for brain <your player name>
 Human player brain <your player name> created; Index=...
@@ -300,8 +317,9 @@ What to check:
   - `adopt external toggle <id> managed X -> Y` — the fallback path fired. It should only
     ever appear when `toggle callback hooked` is **absent**; if both lines show up, the
     callback is being bypassed and that needs investigating.
-- The three behaviour lines (`retreat micro disabled`, `target stickiness enabled`,
-  `build variety reroll active`) are printed **once each, on first hit**. Their presence only
+- The four behaviour lines (`retreat micro disabled`, `target stickiness enabled`,
+  `experimental fire spreading enabled`, `build variety reroll active`) are printed **once
+  each, on first hit**. Their presence only
   proves the wrapper attached and matched at least one unit — it says nothing about how many
   units are covered. If one of them never appears, that wrapper did not attach: the usual cause
   is a renamed function in a newer M28AI.
