@@ -51,13 +51,14 @@ wrappers only change *how* units behave once they exist.
 2. Enable **both** `M28AI` and `M28CampaignAssist` in the in-game mod manager.
 3. Start a campaign mission. Nothing else to configure.
 
-The mod ships no units, no blueprints and no `lua/` files. It adds six hook files:
+The mod ships no units, no blueprints and no `lua/` files. It adds seven hook files:
 
 | File | Purpose |
 |---|---|
 | `hook/lua/simInit.lua` | injects the campaign-only game options |
 | `hook/lua/SimCallbacks.lua` | records your manual per-unit toggle |
 | `hook/lua/sim/Unit.lua` | propagates the takeover to newly built units |
+| `hook/lua/ui/game/orders.lua` | keeps the toggle button's tick in sync with the real state |
 | `hook/mods/M28AI/lua/AI/M28Land.lua` | stops the player's land combat units from backing away |
 | `hook/mods/M28AI/lua/AI/M28Orders.lua` | keeps a locked target, and spreads experimental fire |
 | `hook/mods/M28AI/lua/AI/M28Factory.lua` | rerolls repeated picks when a factory builds a unit |
@@ -207,6 +208,37 @@ command threads; an exception escaping one of them kills that thread, which look
 "a group of units stopped doing anything". Failing safe now means falling back to M28AI's
 original behaviour for that one call.
 
+### Why the toggle button could read "on" while the unit was off (v13)
+
+M28AI's button (`M28AI/hook/lua/ui/game/orders.lua`) trusts the screen:
+
+- `M28ScriptButtonInitFunction` computes the tick **once**, when the selection changes, from the
+  `M28Active` stat. It is never recomputed while the same units stay selected.
+- `M28AIToggle` reads `self:IsChecked()` — that same, possibly stale tick — and sends
+  `Enable = not state` to the sim.
+
+Once this addon started projecting an authoritative state onto that stat, the two diverged in a
+visible way. The reconciler corrects a unit's stat up to a second after you select it, but the
+button keeps showing whatever it read at selection time. A click then inverts the stale value, so
+the same click can turn a unit on or off depending on how old the icon is — the button feels
+"sticky" and occasionally does the opposite of what it looks like. Mixed selections are worse:
+the original code shows a tick whenever *any* selected unit is taken over, and a click sends one
+value for the whole group.
+
+v13 replaces three callbacks on the `M28Toggle` entry of `defaultOrdersTable`, without touching
+M28AI:
+
+- The tick is recomputed about ten times a second from the current selection, using the engine's
+  own per-button frame hook (`AddOrder` calls `SetNeedsFrameUpdate` for any order that carries an
+  `onframe`). The decorative pulse effect that comes with that hook is muted — the button is
+  enabled almost permanently and would otherwise blink forever.
+- A click no longer inverts the drawn tick. It re-reads the stat on the spot, sends the state the
+  unit should **end up** in, and paints the button to match immediately.
+- Units with no builder (ACU, mission-spawned, gifted) are now mirrored from M28AI's own
+  `M28Active` field inside `M28AssistProject` instead of being left alone. `M28Events.lua:3796`
+  writes only the stat when it clears a unit and never clears the field, so "field true / stat 0"
+  could persist indefinitely — the button showed off while the unit was being managed.
+
 ### Behaviour tuning (v8)
 
 The campaign `Options` table is missing the lobby options that control M28AI's play style.
@@ -336,6 +368,7 @@ M28CampaignAssist: set ScenarioInfo.Options.M28CombinedArmy=1 for scenario type=
 M28CampaignAssist: set ScenarioInfo.Options.M28CAInherit=1 for scenario type=campaign
 M28CampaignAssist: set ScenarioInfo.Options.M28Aggression=0.6 for scenario type=campaign
 M28CampaignAssist: toggle callback hooked
+M28CampaignAssist: M28 toggle button bound to authoritative state
 M28CampaignAssist: reconcile thread started (generation 1)
 M28CampaignAssist: reconcile round=1 slots=... alive=... pending=... fixed=... quiet=0
 M28CampaignAssist: toggle Enable=true applied to 1 unit(s)
@@ -354,6 +387,9 @@ What to check:
   "player intent comes from clicks only" mode, so this line is what keeps a finished factory
   from being mistaken for a manual shutdown. If it says `Callbacks table unavailable`, the
   state-sniffing fallback takes over instead — still usable, but report it.
+- `M28 toggle button bound to authoritative state` confirms v13 replaced the button's
+  `initialStateFunc` / `onframe` / `behavior` hooks. If it is missing, the old M28AI button is
+  still in charge: the toggle keeps working, but it will go stale again while units stay selected.
 - `M28CombinedArmy vanished mid-game; restored to 1` means the campaign rebuilt
   `ScenarioInfo.Options` mid-session and the addon put the key back. Harmless, expected once
   per rebuild; without it every taken-over unit would silently stop being projected.

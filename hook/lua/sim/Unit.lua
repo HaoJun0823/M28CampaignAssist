@@ -259,16 +259,30 @@ local function M28AssistProject(oUnit, bCheckShow)
 
     local vManaged = oUnit.M28AssistManaged
     if vManaged == nil then
-        -- 未定案（ACU、剧本直接生成等）：不碰 M28Active，交给 M28AI 默认；
-        -- 但仍保证托管按钮可见，否则玩家没法亲手点亮它。
+        -- 未定案（ACU、剧本直接生成、解析超时）：托管与否仍由 M28AI 的字段决定，
+        -- 本 mod 不改它。但 UI stat 必须跟着这个字段，否则按钮和实际会分叉：
+        -- M28Events.lua:3796 的 else 分支只把 stat 写 0、并不清 oUnit.M28Active，
+        -- 于是「字段 true / stat 0」可以一直挂着 —— 按钮显示关，单位其实在托管。
+        local bChanged = false
+        local iField = 0
+        -- 用 truthy 判断而不是 == true：M28AI 的门禁一律写 if oUnit.M28Active then，
+        -- 字段除了 true 之外也可能是 1，两者对它同义。
+        if oUnit.M28Active then iField = 1 end
+        local iStat = M28AssistReadStat(oUnit, 'M28Active')
+        if iStat == nil or iStat ~= iField then
+            oUnit:UpdateStat('M28Active', iField)
+            bChanged = true
+        end
+
+        -- 未定案单位也必须让托管按钮可见，否则玩家没法亲手点亮它。
         if bCheckShow then
             local iShow = M28AssistReadStat(oUnit, 'M28CombinedArmiesShowUI')
             if iShow == nil or iShow ~= 1 then
                 oUnit:UpdateStat('M28CombinedArmiesShowUI', 1)
-                return true
+                bChanged = true
             end
         end
-        return false
+        return bChanged
     end
 
     local bManaged = (vManaged == true)
