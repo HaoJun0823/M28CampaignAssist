@@ -253,6 +253,11 @@ What to check:
 - `inherit ... managed=` shows each new unit's decision together with the builder's
   authoritative value, raw `M28Active` and whether the builder is a human unit. The first 200
   decisions are logged.
+- The three behaviour lines (`retreat micro disabled`, `target stickiness enabled`,
+  `build variety reroll active`) are printed **once each, on first hit**. Their presence only
+  proves the wrapper attached and matched at least one unit — it says nothing about how many
+  units are covered. If one of them never appears, that wrapper did not attach: the usual cause
+  is a renamed function in a newer M28AI.
 
 Then confirm M28AI's `SteamAIIssue` notice — *"M28AI mod is active, but no AI have been selected
 that use M28AI"* — no longer appears.
