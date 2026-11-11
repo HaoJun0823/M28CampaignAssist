@@ -14,6 +14,11 @@
 --      → 目标粘性：锁定后 8 秒（实验级 12 秒）内，旧目标还活着且仍在 120 距离内，
 --        就把命令改写回旧目标。到期或旧目标失效/跑远后自动放开。
 --
+--      v12 修正：锁定时间以前是每次调用都无条件续期，包括「刚刚把目标改写回旧目标」
+--      的那些轮次。结果锁永不过期 —— 只要目标活着且没跑远，单位会一直咬住不放，
+--      这本身就是「一堆单位永远打同一个目标」的另一半原因。现在只有 M28 自己也
+--      选中了锁定目标时才续期，被拦下的轮次不续期，到期自然放开。
+--
 --   B) 7-8 个实验级单位同时围攻同一个目标，火力严重过剩。
 --      M28 的目标选择是「每个单位独立挑最合适的敌人」，没有占用概念，于是同一批
 --      单位会全部指向同一个目标。第一个目标通常 1-2 秒就打死了，其余火力全是浪费。
@@ -48,8 +53,12 @@ do
     local iM28AssistSpreadRangeMin = 40
     local iM28AssistSpreadRangeMax = 120
     local iM28AssistSpreadRangeBonus = 20
+    -- 同一个单位两次「找替代目标」的最小间隔（秒）。范围查询很贵，必须限流。
+    local fM28AssistSpreadQueryGap = 2
     -- 占用表的过期条目清理间隔（秒）
     local fM28AssistAttackerSweep = 10
+    -- 单个目标上最多记多少个攻击者（纯防御，正常不会碰到）
+    local iM28AssistAttackerCap = 24
 
     local function M28AssistOptionValue(sKey, iDefault)
         local tScenarioInfo = rawget(_G, 'ScenarioInfo')
@@ -132,6 +141,15 @@ do
             tSet = {}
             oTarget.M28AssistAttackers = tSet
         end
+
+        -- 纯防御：这张表正常情况下最多几个条目。万一异常增长（比如过期清理
+        -- 一直没轮到），直接重建，别让一个敌方单位挂着几百个引用。
+        if oTarget.M28AssistAttackerCount2 and oTarget.M28AssistAttackerCount2 > iM28AssistAttackerCap then
+            tSet = {}
+            oTarget.M28AssistAttackers = tSet
+            oTarget.M28AssistAttackerCount2 = 0
+        end
+        oTarget.M28AssistAttackerCount2 = (oTarget.M28AssistAttackerCount2 or 0) + 1
         tSet[oUnit] = fNow
 
         -- 定期清掉过期条目。清理只是控制表大小，漏清不影响上面的判定
@@ -139,11 +157,15 @@ do
         if oTarget.M28AssistAttackerSweep == nil
             or fNow - oTarget.M28AssistAttackerSweep >= fM28AssistAttackerSweep then
             oTarget.M28AssistAttackerSweep = fNow
+            local iKept = 0
             for oAttacker, fTime in tSet do
                 if fNow - fTime > fM28AssistLoadDecay then
                     tSet[oAttacker] = nil
+                else
+                    iKept = iKept + 1
                 end
             end
+            oTarget.M28AssistAttackerCount2 = iKept
         end
     end
 
@@ -152,7 +174,10 @@ do
         if oUnit.Dead then return false end
         if fNow >= (oUnit.M28AssistLockUntil or 0) then return false end
         if not M28UnitInfo.IsUnitValid(oLocked) then return false end
-        local fDist = M28Utilities.GetDistanceBetweenPositions(oUnit:GetPosition(), oLocked:GetPosition())
+        local tPos = oUnit:GetPosition()
+        local tLockPos = oLocked:GetPosition()
+        if tPos == nil or tLockPos == nil then return false end
+        local fDist = M28Utilities.GetDistanceBetweenPositions(tPos, tLockPos)
         if fDist == nil or fDist > fM28AssistStickyMaxDist then return false end
         return true
     end
@@ -160,6 +185,7 @@ do
     -- 在附近找一个负载低于配额的敌人。挑负载最低的，同负载挑最近的。
     -- 找不到就返回 nil，调用方保持原目标（集火总比发呆好）。
     local function M28AssistPickSpreadTarget(oUnit, oRejected, fNow)
+        if oUnit.Dead then return nil end
         local oBrain = oUnit:GetAIBrain()
         if oBrain == nil then return nil end
 
@@ -168,6 +194,7 @@ do
         if iRange > iM28AssistSpreadRangeMax then iRange = iM28AssistSpreadRangeMax end
 
         local tPos = oUnit:GetPosition()
+        if tPos == nil then return nil end
         local tCandidates = oBrain:GetUnitsAroundPoint(M28UnitInfo.refCategoryLandCombat,
             tPos, iRange, 'Enemy')
         if tCandidates == nil or M28Utilities.IsTableEmpty(tCandidates) then return nil end
@@ -177,9 +204,13 @@ do
             if oEnemy ~= oRejected and M28UnitInfo.IsUnitValid(oEnemy) then
                 local iLoad = M28AssistAttackerCount(oEnemy, fNow)
                 if iLoad < iM28AssistTargetQuota then
-                    local fDist = M28Utilities.GetDistanceBetweenPositions(tPos, oEnemy:GetPosition())
-                    if oBest == nil or iLoad < iBestLoad
-                        or (iLoad == iBestLoad and fDist < fBestDist) then
+                    local tEnemyPos = oEnemy:GetPosition()
+                    local fDist = nil
+                    if tEnemyPos ~= nil then
+                        fDist = M28Utilities.GetDistanceBetweenPositions(tPos, tEnemyPos)
+                    end
+                    if fDist ~= nil and (oBest == nil or iLoad < iBestLoad
+                        or (iLoad == iBestLoad and fDist < fBestDist)) then
                         oBest = oEnemy
                         iBestLoad = iLoad
                         fBestDist = fDist
@@ -192,21 +223,27 @@ do
 
     local fnM28AssistOldAttack = IssueTrackedAttack
 
-    function IssueTrackedAttack(oUnit, oOrderTarget, bAddToExistingQueue, sOptionalOrderDesc, bOverrideMicroOrder)
-        -- 没有目标（清命令）、M28 的组合军队被整体关闭、不属于本功能的单位、
-        -- 或托管没打开（原版也不会下发命令）：原样放行。
-        -- 后两个条件很重要：未托管单位如果也记占用，会污染分流统计。
-        if oOrderTarget == nil or bDontConsiderCombinedArmy
-            or not M28AssistEligible(oUnit) or not oUnit.M28Active then
-            return fnM28AssistOldAttack(oUnit, oOrderTarget, bAddToExistingQueue, sOptionalOrderDesc, bOverrideMicroOrder)
+    -- 清掉指向已失效单位的锁。顺带把 Lua 侧对敌方单位的引用释放掉。
+    local function M28AssistDropStaleLocks(oUnit)
+        local oLock = oUnit.M28AssistLockTarget
+        if oLock ~= nil and not M28UnitInfo.IsUnitValid(oLock) then
+            oUnit.M28AssistLockTarget = nil
+            oUnit.M28AssistLockUntil = 0
         end
+        local oSpread = oUnit.M28AssistSpreadLockTarget
+        if oSpread ~= nil and not M28UnitInfo.IsUnitValid(oSpread) then
+            oUnit.M28AssistSpreadLockTarget = nil
+            oUnit.M28AssistSpreadLockUntil = 0
+        end
+    end
 
-        local fNow = GetGameTimeSeconds()
-        local bSpreadUnit = M28AssistIsExperimentalUnit(oUnit)
+    -- 决定这次实际打谁。0 / 1 / 2 三步都在这里。
+    -- 关键目标（ACU / 敌方实验级 / T3 建筑）永远放行：既不参与分散，也不被粘性拦住。
+    local function M28AssistChooseTarget(oUnit, oOrderTarget, fNow, bSpreadUnit)
+        M28AssistDropStaleLocks(oUnit)
 
         -- 0) 分流防抖：上一次分流选定的目标在有效期内优先。
         -- 没有这层，M28 每轮都会把原目标重新算成最佳，单位就在几个目标之间来回跳。
-        -- 关键目标（ACU / 敌方实验级 / T3 建筑）不防抖：出现了就该立刻去打。
         if bSpreadUnit and not M28AssistIsHighValueTarget(oOrderTarget) then
             local oSpread = oUnit.M28AssistSpreadLockTarget
             if oSpread ~= nil and oSpread ~= oOrderTarget
@@ -221,27 +258,32 @@ do
             and M28AssistOptionValue('M28AssistSpreadTarget', 1) ~= 2
             and not M28AssistIsHighValueTarget(oOrderTarget)
             and M28AssistAttackerCount(oOrderTarget, fNow) >= iM28AssistTargetQuota then
-            local oAlt = M28AssistPickSpreadTarget(oUnit, oOrderTarget, fNow)
-            if oAlt ~= nil then
-                oOrderTarget = oAlt
-                -- 记下这次分流，有效期内的后续请求会被第 0 步改回这个目标
-                oUnit.M28AssistSpreadLockTarget = oAlt
-                oUnit.M28AssistSpreadLockUntil = fNow + fM28AssistSpreadSeconds
-                -- 同时清掉粘性锁：否则第 2 步会立刻把它改回旧目标
-                oUnit.M28AssistLockTarget = nil
-                oUnit.M28AssistLockUntil = 0
-                if not bM28AssistSpreadLogged then
-                    bM28AssistSpreadLogged = true
-                    LOG('M28CampaignAssist: experimental fire spreading enabled (quota '
-                        .. tostring(iM28AssistTargetQuota) .. ' per target)')
+            -- 找替代目标是一次范围扫描 + 逐单位类别匹配，很贵。
+            -- 每个单位最多每 2 秒查一次；查不到就继续集火，下一轮再说。
+            local fNextQuery = oUnit.M28AssistSpreadQueryAt or 0
+            if fNow >= fNextQuery then
+                oUnit.M28AssistSpreadQueryAt = fNow + fM28AssistSpreadQueryGap
+                local oAlt = M28AssistPickSpreadTarget(oUnit, oOrderTarget, fNow)
+                if oAlt ~= nil then
+                    oOrderTarget = oAlt
+                    oUnit.M28AssistSpreadLockTarget = oAlt
+                    oUnit.M28AssistSpreadLockUntil = fNow + fM28AssistSpreadSeconds
+                    -- 同时清掉粘性锁：否则第 2 步会立刻把它改回旧目标
+                    oUnit.M28AssistLockTarget = nil
+                    oUnit.M28AssistLockUntil = 0
+                    if not bM28AssistSpreadLogged then
+                        bM28AssistSpreadLogged = true
+                        LOG('M28CampaignAssist: experimental fire spreading enabled (quota '
+                            .. tostring(iM28AssistTargetQuota) .. ' per target)')
+                    end
                 end
             end
         end
 
         -- 2) 目标粘性：锁定期内、旧目标仍可用、且 M28 想换人：改写回旧目标。
         -- 关键目标例外：锁定期间出现 ACU / 敌方实验级 / T3 建筑，允许立刻转火。
-        local bSticky = M28AssistOptionValue('M28AssistStickyTarget', 1) ~= 2
-        if bSticky and not M28AssistIsHighValueTarget(oOrderTarget) then
+        if M28AssistOptionValue('M28AssistStickyTarget', 1) ~= 2
+            and not M28AssistIsHighValueTarget(oOrderTarget) then
             local oLocked = oUnit.M28AssistLockTarget
             if oLocked ~= nil and oLocked ~= oOrderTarget
                 and M28AssistLockStillGood(oUnit, oLocked, fNow) then
@@ -249,16 +291,27 @@ do
             end
         end
 
-        local result = fnM28AssistOldAttack(oUnit, oOrderTarget, bAddToExistingQueue, sOptionalOrderDesc, bOverrideMicroOrder)
+        return oOrderTarget
+    end
 
-        -- 3) 记账：占用统计与锁定时间
+    -- 记账：占用统计与锁定时间。
+    -- bRewritten = 这次的目标是被上面改写过（而不是 M28 自己选的）。
+    local function M28AssistRecord(oUnit, oOrderTarget, fNow, bSpreadUnit, bRewritten)
         M28AssistBumpAttacker(oOrderTarget, oUnit, fNow)
 
-        if bSticky then
+        if M28AssistOptionValue('M28AssistStickyTarget', 1) == 2 then
+            oUnit.M28AssistLockTarget = nil
+            oUnit.M28AssistLockUntil = 0
+            return
+        end
+
+        -- v12：只有 M28 自己也选中了这个目标才续期。
+        -- 之前是无条件续期，于是「改写回旧目标」这一步每轮都会把到期时间往后推，
+        -- 锁永远不会过期 —— 单位会一直咬着同一个敌人，直到它死或跑出 120 距离。
+        -- 现在被拦下的那几轮不续期，锁到期后自然放开，M28 重新获得选目标的自由。
+        if not bRewritten then
             local fSticky = fM28AssistStickySeconds
             if bSpreadUnit then fSticky = fM28AssistStickySecondsExp end
-            -- M28 每轮都会对同一目标重复调用，所以只要还在打它就一直续期；
-            -- 一旦它想换人，上面的分支会拦下并且不续期，到期后锁自然放开。
             oUnit.M28AssistLockTarget = oOrderTarget
             oUnit.M28AssistLockUntil = fNow + fSticky
             if not bM28AssistStickyLogged then
@@ -266,6 +319,30 @@ do
                 LOG('M28CampaignAssist: target stickiness enabled for human campaign land combat units')
             end
         end
+    end
+
+    function IssueTrackedAttack(oUnit, oOrderTarget, bAddToExistingQueue, sOptionalOrderDesc, bOverrideMicroOrder)
+        -- 没有目标（清命令）、M28 的组合军队被整体关闭、不属于本功能的单位、
+        -- 或托管没打开（原版也不会下发命令）：原样放行。
+        -- 后两个条件很重要：未托管单位如果也记占用，会污染分流统计。
+        if oOrderTarget == nil or bDontConsiderCombinedArmy
+            or not M28AssistEligible(oUnit) or not oUnit.M28Active then
+            return fnM28AssistOldAttack(oUnit, oOrderTarget, bAddToExistingQueue, sOptionalOrderDesc, bOverrideMicroOrder)
+        end
+
+        local fNow = GetGameTimeSeconds()
+        local bSpreadUnit = M28AssistIsExperimentalUnit(oUnit)
+
+        -- 选目标这一步会碰到别的单位：可能已失效、brain 可能为空。
+        -- 整段 pcall：一旦出错就按原目标下发。绝不能把异常抛回 M28 的调用方 ——
+        -- 那会终止它整条命令线程，从此一批单位都不再收到命令，看着就是「集体发呆」。
+        local bOK, oChosen = pcall(M28AssistChooseTarget, oUnit, oOrderTarget, fNow, bSpreadUnit)
+        if not bOK or oChosen == nil then oChosen = oOrderTarget end
+
+        local result = fnM28AssistOldAttack(oUnit, oChosen, bAddToExistingQueue, sOptionalOrderDesc, bOverrideMicroOrder)
+
+        -- 记账同样隔离：写失败不影响已经下发出去的命令
+        pcall(M28AssistRecord, oUnit, oChosen, fNow, bSpreadUnit, oChosen ~= oOrderTarget)
 
         return result
     end

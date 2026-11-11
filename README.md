@@ -173,6 +173,40 @@ Three changes:
 These are load reductions, not a behaviour change: which units get taken over, and how they
 fight, is identical.
 
+### Why the reconciler backs off when the world is torn down (v12)
+
+Two crash dumps on the same evening both landed in one engine routine (`0x517340`, three
+offsets: `0x5173b3`, `0x517939`, `0x51797b`) — an entity table behind a critical section, dying
+on a NULL page-table entry and on list unlinks through stale `next`/`prev`. That is C++ object
+lifetime damage inside the engine, not a Lua error: no Lua traceback appears anywhere and the
+log simply stops, mid-cutscene, while the mission-end movie is playing. The log also shows the
+engine itself complaining `CWldSession::DoBeat() unknown entity id ... supplied in a pose update`
+in the same window — the same class of problem, an entity that no longer exists still being
+referenced.
+
+This mod cannot fix engine object lifetime, but the one thing it brings to that window is a
+once-a-second sweep that calls `GetStat` / `UpdateStat` on hundreds of unit objects. v12 makes
+that sweep get out of the way:
+
+- **Mass-loss brake.** A normal fight never kills half of your tracked units within one pass
+  (0.1 s). If that happens, the session is being torn down, so the thread goes quiet for 20
+  seconds and logs `alive dropped A -> B; pausing reconcile for 20s (world teardown)`. It does
+  not call into the engine at all during that pause, not even to count units.
+- **No C calls on dead units.** `M28AssistProject` refuses to run for a unit whose `Dead` flag is
+  set, so `GetStat`/`UpdateStat` are never issued against an object the engine has already
+  started destroying.
+- **`GetFractionComplete` is wrapped in `pcall`.** It was the last unwrapped C call on the
+  per-unit path; a throw there aborted the rest of that unit's reconcile.
+- **Late identity check.** `Unit:OnCreate` sometimes runs before the brain is attached, so enemy
+  units were still slipping into the registry and being swept every pass (v11's filter alone did
+  not achieve what it claimed). Each unit is now re-checked once the brain appears and dropped
+  from the registry if it is not yours.
+
+The three behaviour wrappers are additionally wrapped in `pcall`. They run inside M28AI's own
+command threads; an exception escaping one of them kills that thread, which looks exactly like
+"a group of units stopped doing anything". Failing safe now means falling back to M28AI's
+original behaviour for that one call.
+
 ### Behaviour tuning (v8)
 
 The campaign `Options` table is missing the lobby options that control M28AI's play style.
@@ -211,6 +245,13 @@ multiplayer and every AI brain are untouched.
   on its own when the timer expires, the target dies, or the target runs off. Enemy ACUs, SACUs,
   experimentals and T3 structures punch through the pin: if one of those becomes the new target,
   the switch is allowed immediately. Set `M28AssistStickyTarget = 2` to disable.
+
+  v12 fixes the timer itself: it used to be renewed on **every** call, including the calls where
+  the wrapper had just rewritten the target back to the pinned one. That made the pin permanent
+  for as long as the target stayed alive and in range — a unit could be locked onto the same
+  enemy for the rest of the game, which is the other half of "they all attack the same thing
+  forever". The pin is now renewed only when M28AI independently chose the pinned target, so it
+  really does expire after 8 / 12 seconds and M28AI gets its choice back.
 
 - **Fire spreading** (`hook/mods/M28AI/lua/AI/M28Orders.lua`). M28AI picks targets per unit with
   no notion of who else is already shooting at what, so a group of experimentals all converge on
@@ -325,6 +366,11 @@ What to check:
   reconciler.
 - `reconcile thread stalled, restarting` means the watchdog fired. Once is harmless; repeated
   lines point at an exception that needs the log detail.
+- `alive dropped A -> B; pausing reconcile for 20s (world teardown)` means the sweep saw more
+  than half of your tracked units disappear inside one pass and stood down. Seeing it once at
+  the end of a mission is the intended behaviour; seeing it mid-game means something wiped your
+  army in under a second (a nuke, or a scenario script), and the sweep resumes by itself after
+  20 seconds.
 - `toggle Enable=...` confirms the click reached the sim side and how many units it changed.
   Every line here should be `Enable=true` unless you actually clicked units off; an
   `Enable=false` you did not cause is a bug.

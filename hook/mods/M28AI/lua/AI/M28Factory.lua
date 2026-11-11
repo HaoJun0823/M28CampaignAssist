@@ -30,13 +30,22 @@
 do
     local bM28AssistVarietyLogged = false
 
+    -- 原函数必须在其他局部函数之前取别名：Lua 是词法作用域，
+    -- 后面才声明的 local 在先前定义的函数体里不可见（会解析成全局 → nil）。
+    local fnM28AssistOldGetBlueprint = GetBlueprintThatCanBuildOfCategory
+
     local function M28AssistWantsVariety(aiBrain, oFactory)
         if type(aiBrain) ~= 'table' then return false end
         if type(oFactory) ~= 'table' or type(oFactory.UnitId) ~= 'string' then return false end
 
-        -- 这个函数也被用来给工程师/Acu 挑建筑蓝图（M28Engineer、M28Economy、M28ACU），
-        -- 那些调用不该被「最近三次」记录影响，所以这里只放行真正的工厂。
-        if not EntityCategoryContains(M28UnitInfo.refCategoryFactory, oFactory.UnitId) then return false end
+        -- 这个函数在「选兵」和「选建筑」两条路上都会被频繁调用（每个工厂 / 工程师 /
+        -- ACU 每次决策一次），类别匹配按单位缓存一次，别反复重算。
+        local bIsFactory = oFactory.M28AssistIsFactory
+        if bIsFactory == nil then
+            bIsFactory = EntityCategoryContains(M28UnitInfo.refCategoryFactory, oFactory.UnitId)
+            oFactory.M28AssistIsFactory = bIsFactory
+        end
+        if not bIsFactory then return false end
 
         local tScenarioInfo = rawget(_G, 'ScenarioInfo')
         if type(tScenarioInfo) ~= 'table' or tScenarioInfo.type ~= 'campaign' then return false end
@@ -54,16 +63,11 @@ do
         return string.sub(sBlueprint, 1, 2)
     end
 
-    local fnM28AssistOldGetBlueprint = GetBlueprintThatCanBuildOfCategory
-
-    function GetBlueprintThatCanBuildOfCategory(aiBrain, iCategoryCondition, oFactory, bGetSlowest, bGetFastest, bGetCheapest, iOptionalCategoryThatMustBeAbleToBuild, bIgnoreTechDifferences, iOptionalMaxSkirtSize, bGetMostExpensive)
-        local sBlueprint = fnM28AssistOldGetBlueprint(aiBrain, iCategoryCondition, oFactory, bGetSlowest, bGetFastest, bGetCheapest, iOptionalCategoryThatMustBeAbleToBuild, bIgnoreTechDifferences, iOptionalMaxSkirtSize, bGetMostExpensive)
-
-        -- 只处理「普通选兵」：四种明确的最优解查询直接放行
-        if bGetSlowest or bGetFastest or bGetCheapest or bGetMostExpensive then
-            return sBlueprint
-        end
-        if type(sBlueprint) ~= 'string' then return sBlueprint end
+    -- 去重逻辑单独一层，方便整体 pcall：这里会再调一次原函数，任何意外都退回原选择。
+    local function M28AssistPostPick(aiBrain, iCategoryCondition, oFactory, sBlueprint,
+        bGetSlowest, bGetFastest, bGetCheapest,
+        iOptionalCategoryThatMustBeAbleToBuild, bIgnoreTechDifferences,
+        iOptionalMaxSkirtSize, bGetMostExpensive)
         if not M28AssistWantsVariety(aiBrain, oFactory) then return sBlueprint end
 
         local tRecent = oFactory.M28AssistRecentBPs
@@ -99,6 +103,25 @@ do
         tRecent[3] = tRecent[2]
         tRecent[2] = tRecent[1]
         tRecent[1] = sBlueprint
+        return sBlueprint
+    end
+
+    function GetBlueprintThatCanBuildOfCategory(aiBrain, iCategoryCondition, oFactory, bGetSlowest, bGetFastest, bGetCheapest, iOptionalCategoryThatMustBeAbleToBuild, bIgnoreTechDifferences, iOptionalMaxSkirtSize, bGetMostExpensive)
+        local sBlueprint = fnM28AssistOldGetBlueprint(aiBrain, iCategoryCondition, oFactory, bGetSlowest, bGetFastest, bGetCheapest, iOptionalCategoryThatMustBeAbleToBuild, bIgnoreTechDifferences, iOptionalMaxSkirtSize, bGetMostExpensive)
+
+        -- 只处理「普通选兵」：四种明确的最优解查询直接放行
+        if bGetSlowest or bGetFastest or bGetCheapest or bGetMostExpensive then
+            return sBlueprint
+        end
+        if type(sBlueprint) ~= 'string' then return sBlueprint end
+
+        -- 去重整段包 pcall：这个函数是每次建造决策的必经之路，
+        -- 抛错会打断调用方（M28 的工厂线程），工厂从此不再造东西。
+        local bOK, sChosen = pcall(M28AssistPostPick, aiBrain, iCategoryCondition, oFactory, sBlueprint,
+            bGetSlowest, bGetFastest, bGetCheapest,
+            iOptionalCategoryThatMustBeAbleToBuild, bIgnoreTechDifferences,
+            iOptionalMaxSkirtSize, bGetMostExpensive)
+        if bOK and type(sChosen) == 'string' then return sChosen end
         return sBlueprint
     end
 end

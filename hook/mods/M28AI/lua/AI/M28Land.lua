@@ -47,12 +47,17 @@ do
         local bCached = oUnit.M28AssistNoRetreatEligible
         if bCached ~= nil then return bCached end
 
+        -- brain 还没挂上时不要缓存：缓存成 false 会让这个单位永久保留 M28 的后撤
+        -- 行为，表现就是「同样是坦克，有的冲锋有的往后跑」。
+        local oBrain = oUnit:GetAIBrain()
+        if oBrain == nil then return false end
+
         local bResult = false
         if type(oUnit.UnitId) == 'string'
             and not EntityCategoryContains(categories.COMMAND + categories.SUBCOMMANDER + categories.EXPERIMENTAL, oUnit.UnitId)
-            and EntityCategoryContains(M28UnitInfo.refCategoryLandCombat, oUnit.UnitId) then
-            local oBrain = oUnit:GetAIBrain()
-            if oBrain ~= nil and oBrain.BrainType == 'Human' then bResult = true end
+            and EntityCategoryContains(M28UnitInfo.refCategoryLandCombat, oUnit.UnitId)
+            and oBrain.BrainType == 'Human' then
+            bResult = true
         end
         oUnit.M28AssistNoRetreatEligible = bResult
         return bResult
@@ -61,7 +66,10 @@ do
     local fnM28AssistOldBackup = BackupUnitTowardsRallyIfAvailable
 
     function BackupUnitTowardsRallyIfAvailable(oUnit, tRallyPoint, iIslandPlateauOrPondRef, sOrderDesc, bAmphibiousAndUsingPlateauRef, iDefaultDistOverride, iMaxAngleDifForMovingBackwardsOverride, bUsingPondRef)
-        if M28AssistWantsNoRetreat(oUnit) then
+        -- 判定放在 pcall 里：这个函数被 M28 的部队循环反复调用，
+        -- 一旦这里抛错会终止调用方的整条循环，一批单位从此不再收到任何命令。
+        local bOK, bSkip = pcall(M28AssistWantsNoRetreat, oUnit)
+        if bOK and bSkip == true then
             if not bM28AssistNoRetreatLogged then
                 bM28AssistNoRetreatLogged = true
                 LOG('M28CampaignAssist: retreat micro disabled for human campaign land combat units')
