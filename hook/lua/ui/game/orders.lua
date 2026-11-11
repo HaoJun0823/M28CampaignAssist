@@ -136,7 +136,8 @@ if type(tM28AssistOrderInfo) == 'table' then
     -- 节流到 0.1 秒：几十个单位的 GetStat 不值得每帧跑，而人的反应也快不过它。
     local fM28AssistAccum = 0
     tM28AssistOrderInfo.onframe = function(control, deltaTime)
-        fM28AssistAccum = fM28AssistAccum + (deltaTime or 0)
+        -- deltaTime 缺省时按一整段计时，否则累加器永远长不大、按钮永不刷新
+        fM28AssistAccum = fM28AssistAccum + (deltaTime or 0.1)
         if fM28AssistAccum < 0.1 then return end
         fM28AssistAccum = 0
         if type(currentSelection) ~= 'table' then return end
