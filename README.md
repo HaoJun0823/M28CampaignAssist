@@ -150,6 +150,29 @@ of each pass was spent walking dead slots. v5 removes that growth:
   entirely and is relaunched by the next build action (also covers save/load).
 - Outside campaign sessions the hooks do nothing at all.
 
+### Why the reconciler no longer looks at enemy units (v11)
+
+The registry used to accept every unit created in the session, then project the takeover stats
+onto all of them. In a late-campaign fight that meant `slots=2487 alive=2293` — the player
+cannot own 2,293 units, so almost all of that work was spent on enemy AI units. For each of
+them, once a second, the thread called `GetFractionComplete`, `GetStat` and sometimes
+`UpdateStat`. `M28CombinedArmiesShowUI` is only ever read by the UI for the **selected** unit
+(`M28AI/hook/lua/ui/game/orders.lua:234`), so writing it onto enemy units accomplished nothing.
+
+Three changes:
+
+- Only units whose brain is known and human are registered. A unit whose brain is not attached
+  yet is still registered (better to over-track than to miss one).
+- `GetFractionComplete` is cached once a unit reports completion, removing the most expensive
+  call from the steady-state pass.
+- When the last tracked unit disappears while the registry is large, the thread stops at once
+  instead of idling for another 20 passes. That window is exactly the end-of-mission cleanup,
+  when the engine is destroying thousands of units; there is no reason for this mod to be
+  calling into unit objects during it.
+
+These are load reductions, not a behaviour change: which units get taken over, and how they
+fight, is identical.
+
 ### Behaviour tuning (v8)
 
 The campaign `Options` table is missing the lobby options that control M28AI's play style.
@@ -294,10 +317,12 @@ What to check:
   `ScenarioInfo.Options` mid-session and the addon put the key back. Harmless, expected once
   per rebuild; without it every taken-over unit would silently stop being projected.
 - `reconcile round=...` heartbeats (first round, then every 30 passes) prove the projection
-  thread is alive. `slots` should track the number of live units rather than grow forever,
-  `pending` should fall back to 0 quickly, `quiet` shows the backoff state, and `fixed` counts
-  corrections for that pass — it should be small and settle near zero. A `fixed` count that
-  stays high means something keeps rewriting units behind the reconciler.
+  thread is alive. From v11 `slots` and `alive` count **your** units only, so a normal
+  late-campaign session reads in the hundreds, not the thousands; a four-digit number means the
+  brain filter is not working. `pending` should fall back to 0 quickly, `quiet` shows the
+  backoff state, and `fixed` counts corrections for that pass — it should be small and settle
+  near zero. A `fixed` count that stays high means something keeps rewriting units behind the
+  reconciler.
 - `reconcile thread stalled, restarting` means the watchdog fired. Once is harmless; repeated
   lines point at an exception that needs the log detail.
 - `toggle Enable=...` confirms the click reached the sim side and how many units it changed.

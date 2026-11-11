@@ -156,10 +156,17 @@ local function M28AssistIsHumanUnit(oUnit)
 end
 
 local function M28AssistIsComplete(oUnit)
+    -- 一旦完工就长期成立，缓存住可以省掉每轮一次的 C 调用。
+    -- 这是对账里最贵的调用之一：每轮每个单位都要走一次 GetFractionComplete。
+    if oUnit.M28AssistComplete == true then return true end
     if not M28AssistIsAlive(oUnit) or not oUnit.GetFractionComplete then return true end
     local fFraction = oUnit:GetFractionComplete()
     if fFraction == nil then return true end
-    return fFraction >= 1
+    if fFraction >= 1 then
+        oUnit.M28AssistComplete = true
+        return true
+    end
+    return false
 end
 
 local function M28AssistUnitLabel(oUnit)
@@ -342,6 +349,16 @@ end
 -- 槽位分配：优先复用死亡单位留下的槽位，避免登记表无限增长。
 local function M28AssistTrackUnit(oUnit)
     if oUnit.M28AssistSlot ~= nil then return end
+
+    -- 只登记玩家自己的单位。M28 的逐单位托管只对人类 brain 有意义，而本 mod 的
+    -- 对账每轮要给每个登记单位读写 UI stat。把敌方 AI 的上千个单位一并纳进来
+    -- 是纯浪费（实测一局 slots=2487，玩家自己的单位只有几百），而且任务结束、
+    -- 引擎批量销毁单位时这轮遍历还在跑，等于在清理窗口里持续调用 C 接口。
+    -- brain 尚未挂上时不做判断（宁多勿少），后续轮次也不会再补判，代价可忽略。
+    if type(oUnit.GetAIBrain) ~= 'function' then return end
+    local oBrain = oUnit:GetAIBrain()
+    if oBrain ~= nil and oBrain.BrainType ~= 'Human' then return end
+
     local iSlot
     if iM28AssistFreeCount > 0 then
         iSlot = tM28AssistFree[iM28AssistFreeCount]
@@ -500,6 +517,7 @@ local function M28AssistReconcileLoop(iGeneration)
             return   -- 已被看门狗重启，旧线程安静退出，不动共享标志
         end
 
+        local iRoundBefore = iM28AssistRound
         local bOK, a, b, c, d, e = pcall(M28AssistReconcileRound)
         local iResolved, iPending, iAlive, iFixed, iNew = 0, 0, 0, 0, 0
         if bOK and a then
@@ -518,7 +536,16 @@ local function M28AssistReconcileLoop(iGeneration)
         end
 
         -- 长时间没有任何单位：退出线程，下次建造动作会重新拉起（读档/切图自愈）
-        if iAlive == 0 and iPending == 0 and iM28AssistQuiet >= iM28AssistExitRounds then
+        --
+        -- 另一条更急的出口：这一局明明登记过大量单位，现在存活数归零 —— 那是任务
+        -- 结束或切图，引擎正在成批销毁单位。以前要再空转 20 轮（约 20 秒）才退出，
+        -- 这段时间正好落在清理窗口里。直接停掉，别和引擎抢。
+        -- 只在「本轮确实跑过对账」时判断，否则选项被关掉时返回的全 0 会误触发。
+        local bRoundRan = (iM28AssistRound > iRoundBefore)
+        local bWorldGone = bRoundRan and iAlive == 0 and iPending == 0
+            and iM28AssistSlotTop > 100
+        if bWorldGone
+            or (iAlive == 0 and iPending == 0 and iM28AssistQuiet >= iM28AssistExitRounds) then
             if iGeneration == iM28AssistGeneration then
                 bM28AssistThreadAlive = false
                 M28AssistLog('reconcile thread idle, exiting')
