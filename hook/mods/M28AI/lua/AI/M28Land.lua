@@ -42,13 +42,20 @@ do
         if type(tOptions) ~= 'table' then return false end
         if tonumber(tOptions.M28AssistNoKite or 1) == 2 then return false end
 
-        if type(oUnit.UnitId) ~= 'string' then return false end
-        if EntityCategoryContains(categories.COMMAND + categories.SUBCOMMANDER + categories.EXPERIMENTAL, oUnit.UnitId) then return false end
-        if not EntityCategoryContains(M28UnitInfo.refCategoryLandCombat, oUnit.UnitId) then return false end
+        -- 单位类别与 brain 类型在生命周期内不变，判定一次后缓存，
+        -- 避免每次撤退决策都做两次类别匹配。
+        local bCached = oUnit.M28AssistNoRetreatEligible
+        if bCached ~= nil then return bCached end
 
-        local oBrain = oUnit:GetAIBrain()
-        if oBrain == nil or oBrain.BrainType ~= 'Human' then return false end
-        return true
+        local bResult = false
+        if type(oUnit.UnitId) == 'string'
+            and not EntityCategoryContains(categories.COMMAND + categories.SUBCOMMANDER + categories.EXPERIMENTAL, oUnit.UnitId)
+            and EntityCategoryContains(M28UnitInfo.refCategoryLandCombat, oUnit.UnitId) then
+            local oBrain = oUnit:GetAIBrain()
+            if oBrain ~= nil and oBrain.BrainType == 'Human' then bResult = true end
+        end
+        oUnit.M28AssistNoRetreatEligible = bResult
+        return bResult
     end
 
     local fnM28AssistOldBackup = BackupUnitTowardsRallyIfAvailable

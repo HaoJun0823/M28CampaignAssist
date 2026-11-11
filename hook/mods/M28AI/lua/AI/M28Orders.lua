@@ -40,17 +40,25 @@ do
         if type(tOptions) ~= 'table' then return false end
         if tonumber(tOptions.M28AssistStickyTarget or 1) == 2 then return false end
 
-        if type(oUnit.UnitId) ~= 'string' then return false end
-        if EntityCategoryContains(categories.COMMAND + categories.SUBCOMMANDER + categories.EXPERIMENTAL, oUnit.UnitId) then return false end
-        if not EntityCategoryContains(M28UnitInfo.refCategoryLandCombat, oUnit.UnitId) then return false end
+        -- 这个函数每轮、每单位都会被调若干次，类别判定是这里最贵的一步，
+        -- 而单位类别和 brain 类型在生命周期内不会变，所以按单位缓存一次。
+        local bCached = oUnit.M28AssistStickyEligible
+        if bCached ~= nil then return bCached end
 
-        local oBrain = oUnit:GetAIBrain()
-        if oBrain == nil or oBrain.BrainType ~= 'Human' then return false end
-        return true
+        local bResult = false
+        if type(oUnit.UnitId) == 'string'
+            and not EntityCategoryContains(categories.COMMAND + categories.SUBCOMMANDER + categories.EXPERIMENTAL, oUnit.UnitId)
+            and EntityCategoryContains(M28UnitInfo.refCategoryLandCombat, oUnit.UnitId) then
+            local oBrain = oUnit:GetAIBrain()
+            if oBrain ~= nil and oBrain.BrainType == 'Human' then bResult = true end
+        end
+        oUnit.M28AssistStickyEligible = bResult
+        return bResult
     end
 
     local function M28AssistLockStillGood(oUnit, oLocked, fNow)
         if type(oLocked) ~= 'table' then return false end
+        if oUnit.Dead then return false end
         if fNow >= (oUnit.M28AssistLockUntil or 0) then return false end
         if not M28UnitInfo.IsUnitValid(oLocked) then return false end
         local fDist = M28Utilities.GetDistanceBetweenPositions(oUnit:GetPosition(), oLocked:GetPosition())
@@ -76,14 +84,14 @@ do
 
         local result = fnM28AssistOldAttack(oUnit, oOrderTarget, bAddToExistingQueue, sOptionalOrderDesc, bOverrideMicroOrder)
 
-        -- 接受新目标后重新起算锁定时间
-        if oOrderTarget ~= oLocked then
-            oUnit.M28AssistLockTarget = oOrderTarget
-            oUnit.M28AssistLockUntil = fNow + fM28AssistStickySeconds
-            if not bM28AssistStickyLogged then
-                bM28AssistStickyLogged = true
-                LOG('M28CampaignAssist: target stickiness enabled for human campaign land combat units')
-            end
+        -- 接受这个目标后重新起算锁定时间。M28 每轮都会对同一目标重复调用，
+        -- 所以只要还在打它就一直续期；一旦它想换人，上面的分支会拦下并且不续期，
+        -- 8 秒后锁自然过期，允许换目标。
+        oUnit.M28AssistLockTarget = oOrderTarget
+        oUnit.M28AssistLockUntil = fNow + fM28AssistStickySeconds
+        if not bM28AssistStickyLogged then
+            bM28AssistStickyLogged = true
+            LOG('M28CampaignAssist: target stickiness enabled for human campaign land combat units')
         end
         return result
     end
