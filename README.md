@@ -149,8 +149,8 @@ Two behaviours have no lobby option, so they are handled by small wrappers:
   `refbCanKite` inside `RecordUnitRange`; the land AI reads it to choose between "kite backwards"
   and "press the attack". The wrapper clears that flag for the player's **land combat units**, so
   they close in and use manual-attack/attack-move instead of reversing out of enemy range. Air,
-  navy, MAA, engineers and experimentals are untouched. Set `M28AssistNoKite = 2` to restore
-  M28AI's original kiting.
+  navy, MAA, engineers, ACU/SACU and experimentals are untouched. Set `M28AssistNoKite = 2` to
+  restore M28AI's original kiting.
 
 Why these wrappers are safe to keep across M28AI upgrades: the engine concatenates them onto
 M28AI's files, and M28AI's module system uses a live environment table (`lua/system/import.lua`

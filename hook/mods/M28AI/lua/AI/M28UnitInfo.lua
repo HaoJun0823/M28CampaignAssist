@@ -13,7 +13,7 @@
 --   靠近敌人后改为 manual attack / attack move 压上去，而不是掉头拉开距离。
 --
 -- 范围：只影响「玩家 brain（BrainType == 'Human'）+ 单人战役 + 陆军战斗单位」。
---   防空、空军、海军、工程、实验级单位不受影响；敌方 AI 与遭遇战完全不受影响。
+--   防空、空军、海军、工程、ACU/SACU、实验级单位不受影响；敌方 AI 与遭遇战完全不受影响。
 --
 -- 可调：把 ScenarioInfo.Options.M28AssistNoKite 设为 2 可恢复 M28 原版风筝行为。
 
@@ -32,7 +32,7 @@ do
         if tonumber(tOptions.M28AssistNoKite or 1) == 2 then return false end
 
         if type(oUnit.UnitId) ~= 'string' then return false end
-        if EntityCategoryContains(categories.COMMAND + categories.SUBCOMMANDER, oUnit.UnitId) then return false end
+        if EntityCategoryContains(categories.COMMAND + categories.SUBCOMMANDER + categories.EXPERIMENTAL, oUnit.UnitId) then return false end
         if not EntityCategoryContains(refCategoryLandCombat, oUnit.UnitId) then return false end
 
         local oBrain = oUnit:GetAIBrain()
