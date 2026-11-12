@@ -234,6 +234,12 @@ M28AI:
   enabled almost permanently and would otherwise blink forever.
 - A click no longer inverts the drawn tick. It re-reads the stat on the spot, sends the state the
   unit should **end up** in, and paints the button to match immediately.
+- The fresh paint is then **held** until the stat catches up. This is the part v13 got wrong:
+  the stat has to travel to the sim and back, so for the first 0.1 s the refresh still sees the
+  pre-click value and overwrites the tick — the button looked like it ignored the click. The
+  hold lasts at most two seconds and logs `toggle visual hold expired` if the stat never follows.
+  A second click inside that window inverts the held target, not the stale stat, so double-click
+  really does mean on-then-off.
 - Units with no builder (ACU, mission-spawned, gifted) are now mirrored from M28AI's own
   `M28Active` field inside `M28AssistProject` instead of being left alone. `M28Events.lua:3796`
   writes only the stat when it clears a unit and never clears the field, so "field true / stat 0"
@@ -369,6 +375,7 @@ M28CampaignAssist: set ScenarioInfo.Options.M28CAInherit=1 for scenario type=cam
 M28CampaignAssist: set ScenarioInfo.Options.M28Aggression=0.6 for scenario type=campaign
 M28CampaignAssist: toggle callback hooked
 M28CampaignAssist: M28 toggle button bound to authoritative state
+M28CampaignAssist: click target=false selected=1
 M28CampaignAssist: reconcile thread started (generation 1)
 M28CampaignAssist: reconcile round=1 slots=... alive=... pending=... fixed=... quiet=0
 M28CampaignAssist: toggle Enable=true applied to 1 unit(s)
@@ -390,6 +397,13 @@ What to check:
 - `M28 toggle button bound to authoritative state` confirms v13 replaced the button's
   `initialStateFunc` / `onframe` / `behavior` hooks. If it is missing, the old M28AI button is
   still in charge: the toggle keeps working, but it will go stale again while units stay selected.
+- `click target=... selected=...` is printed on each click (capped at 30 lines). `target` is what
+  the click decided the new state should be; `selected` is how many units were selected. If a
+  click on a taken-over unit reports `target=true` instead of `false`, the UI could not read the
+  stat and the hold is papering over it — send the log.
+- `toggle visual hold expired` means the button was painted one way and the `M28Active` stat
+  never followed within two seconds, so the icon snapped back. Once is worth reporting: it means
+  the sim-side write did not happen.
 - `M28CombinedArmy vanished mid-game; restored to 1` means the campaign rebuilt
   `ScenarioInfo.Options` mid-session and the addon put the key back. Harmless, expected once
   per rebuild; without it every taken-over unit would silently stop being projected.

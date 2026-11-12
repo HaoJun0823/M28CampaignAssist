@@ -45,6 +45,9 @@ if bM28AssistGotTable and type(tM28AssistTable) == 'table' then
 end
 
 if type(tM28AssistOrderInfo) == 'table' then
+    local M28AssistHoldWarned = false
+    local iM28AssistClickLogs = 0
+
     -- 读一个单位当前的托管状态：true / false；读不到返回 nil（不参与统计）。
     local function M28AssistReadState(oUnit)
         if not oUnit then return nil end
@@ -134,15 +137,48 @@ if type(tM28AssistOrderInfo) == 'table' then
 
     -- 每帧刷新。M28AI 原版只在选中那一刻算一次，选着不动就会长期显示旧值。
     -- 节流到 0.1 秒：几十个单位的 GetStat 不值得每帧跑，而人的反应也快不过它。
-    local fM28AssistAccum = 0
+    --
+    -- 关键：点击之后必须有一段「等待窗口」。
+    -- UI 读的 stat 是从 sim 侧同步过来的，一次点击要先经 SimCallback 到 sim、
+    -- 由 M28AI 的宿主回调写 stat、再同步回 UI，通常要几十到几百毫秒。这期间
+    -- 扫描到的仍是旧值；如果照常刷新，就会把刚画出来的勾选立刻抹掉，表现就是
+    -- 「点了一点反应都没有、看不出亮暗变化」。等待窗口里只要 stat 还没跟上，
+    -- 就保持点击时画的状态；一旦跟上（或超时）立刻交还给自动刷新。
     tM28AssistOrderInfo.onframe = function(control, deltaTime)
-        -- deltaTime 缺省时按一整段计时，否则累加器永远长不大、按钮永不刷新
-        fM28AssistAccum = fM28AssistAccum + (deltaTime or 0.1)
-        if fM28AssistAccum < 0.1 then return end
-        fM28AssistAccum = 0
+        local fDelta = deltaTime or 0.1
+        -- 累加器挂在按钮自己身上，不占文件级 local，也不会被别的按钮干扰
+        local fAccum = (control.M28AssistAccum or 0) + fDelta
+        if fAccum < 0.1 then
+            control.M28AssistAccum = fAccum
+            return
+        end
+        control.M28AssistAccum = 0
         if type(currentSelection) ~= 'table' then return end
 
         local bAnyOn, bAnyOff = M28AssistScan(currentSelection)
+
+        local fHold = control.M28AssistHoldTime
+        if fHold ~= nil and fHold > 0 then
+            if bAnyOn ~= control.M28AssistHoldTarget then
+                fHold = fHold - fDelta
+                if fHold > 0 then
+                    control.M28AssistHoldTime = fHold
+                    return   -- stat 尚未同步回来，保持点击时画的状态
+                end
+                -- 等待超时：sim 侧始终没写成，放弃本地覆盖，显示真实值
+                control.M28AssistHoldTime = nil
+                control.M28AssistHoldTarget = nil
+                if not M28AssistHoldWarned then
+                    M28AssistHoldWarned = true
+                    LOG('M28CampaignAssist: toggle visual hold expired; the M28Active stat never followed the click')
+                end
+            else
+                -- stat 已经跟上，交还给自动刷新
+                control.M28AssistHoldTime = nil
+                control.M28AssistHoldTarget = nil
+            end
+        end
+
         local bMixed = (bAnyOn and bAnyOff) == true
         if control:IsChecked() ~= bAnyOn or (control._mixedIcon ~= nil) ~= bMixed then
             M28AssistApply(control, bAnyOn, bAnyOff)
@@ -156,9 +192,17 @@ if type(tM28AssistOrderInfo) == 'table' then
             -- 框架以程序方式切换时才信它；玩家点击时 subState 为 nil。
             bTarget = (subState == true)
         else
-            local bAnyOn = M28AssistScan(currentSelection)
+            -- 上一次点击的目标值比 stat 更权威：stat 还没同步回来时，
+            -- 连续点击必须基于「上一次点出来的状态」取反，否则连点两次
+            -- 会连发两次同一个值，用户看到的就是「点了没反应」。
+            local bCurrent
+            if self.M28AssistHoldTarget ~= nil then
+                bCurrent = (self.M28AssistHoldTarget == true)
+            else
+                bCurrent = M28AssistScan(currentSelection)
+            end
             -- 与 M28AI 原版语义一致：只要还有单位在托管就整组收回，否则整组交出。
-            bTarget = not bAnyOn
+            bTarget = not bCurrent
         end
 
         -- 问号图标表示「混合」，点击之后就不再混合了。
@@ -174,12 +218,25 @@ if type(tM28AssistOrderInfo) == 'table' then
         end
 
         -- 立刻给出视觉反馈，不用等下一帧 onframe。
+        -- 随后开一个等待窗口：stat 从 sim 同步回来之前，onframe 不许覆盖它，
+        -- 否则刚点出来的亮/暗会在 0.1 秒后被旧值抹掉（这就是「看不到变化」）。
         if subState == nil then
             self:SetCheck(bTarget)
+            self.M28AssistHoldTarget = bTarget
+            self.M28AssistHoldTime = 2.0
         end
 
         -- Enable 是「点击后应处于的状态」，hook/lua/SimCallbacks.lua 会把它写成权威值。
         SimCallback({ Func = 'M28SharedArmiesCallback', Args = { Enable = bTarget } }, true)
+
+        -- 诊断：确认 UI 侧读到的 stat 与点击意图是否对得上（限流 30 条）。
+        if subState == nil and iM28AssistClickLogs < 30 then
+            iM28AssistClickLogs = iM28AssistClickLogs + 1
+            local iUnits = 0
+            for i, oUnit in currentSelection or {} do iUnits = iUnits + 1 end
+            LOG('M28CampaignAssist: click target=' .. tostring(bTarget)
+                .. ' selected=' .. tostring(iUnits))
+        end
     end
 
     LOG('M28CampaignAssist: M28 toggle button bound to authoritative state')
