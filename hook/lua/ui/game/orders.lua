@@ -1,32 +1,37 @@
 -- M28CampaignAssist（M28AI 附属 mod）
--- hook/lua/ui/game/orders.lua  -- v13
+-- hook/lua/ui/game/orders.lua  -- v15
 --
 -- 这个文件只做一件事：让 M28 托管按钮的勾选状态与「真实的托管状态」一致。
 --
--- ============ 原版为什么会有开有关 ============
--- M28AI 的按钮实现在 mods/M28AI/hook/lua/ui/game/orders.lua，它对屏幕上的勾选值
--- 过于信任，有两个窗口会失配：
---   1) M28ScriptButtonInitFunction 只在「选择单位的那一刻」按 stat 算一次勾选。
---      选中期间不动鼠标，若 sim 侧对账把某单位的托管状态改了（例如刚建好的工厂
---      完成定案、或 M28AI 自己清了 stat），按钮不会重新计算，就这么一直显示旧值。
---   2) M28AIToggle 点击时用 self:IsChecked() 取反当作玩家意图。屏幕上那个值可能
---      是几十秒前的：显示「勾着」而实际已关 → 点一下发出去的是「关」，看上去
---      毫无反应；显示「没勾」而实际开着 → 点一下发的还是「开」。用户看到的就是
---      「这按钮有开有关、点两下才对」。
--- 本 mod 把 M28Active 变成权威托管的投影之后，这两个窗口被放大，必须补上。
+-- ============ 原版为什么会「有开有关」 ============
+-- M28AI 的按钮实现在 mods/M28AI/hook/lua/ui/game/orders.lua，它只信任屏幕上的值：
+--   1) 勾选只在「选中单位的那一刻」按 stat 算一次（M28ScriptButtonInitFunction），
+--      之后选中期间不再重算；
+--   2) 点击时用 self:IsChecked() 取反当作玩家意图。
+-- 于是只要屏幕值和真实状态分叉，同一次点击就可能发出相反的值：屏幕显示「亮」而
+-- 实际已关 → 点一下发出去的是「关」，看着毫无反应；屏幕显示「暗」而实际开着 →
+-- 点一下发的还是「开」。这就是「有开有关、点两下才对」。
 --
--- ============ 做法（不改 M28AI 一个字节） ============
---   * 接管 initialStateFunc：按传入的 unitList 算初始勾选（与原版等价，多一层
---     空值保护）。
---   * 加 onframe：引擎自带的按钮刷新钩子（AddOrder 里对带 onframe 的按钮调了
---     checkbox:SetNeedsFrameUpdate(true)），按 currentSelection 重算勾选，
---     顺带维护混合选择的问号图标。节流到约 0.1 秒一次，不需要自己起线程。
---   * 接管 behavior：点击时不信 IsChecked()，当场重读 stat 算出「点击之后应当
---     处于的状态」，把这个状态直接发给宿主回调；视觉上也立刻置成同一状态。
+-- ============ v13 / v14 为什么没解决 ============
+-- v13 让按钮每 0.1 秒从 stat 'M28Active' 重算勾选。两个问题：
+--   a) 点击之后 stat 要经过 UI→sim→UI 的一次往返才更新，这期间重算把刚画出来的
+--      勾选抹回旧值，按钮看起来点了没反应（v14 加「等待窗口」只是在绕这个问题）。
+--   b) 更要紧的是实测发现这个 stat 在战役里并不可靠地同步回 UI。它不是蓝图
+--      General.StatToggles 里声明的引擎 stat（官方 SetStatByCallback 只接受那种），
+--      而是 M28AI 用 UpdateStat 在 Lua 里动态创建的；引擎的同步层对这种 stat 的
+--      处理并不等价，切走再切回时读到的仍是 0，按钮就永远显示成暗的。
 --
--- 为什么 stat 'M28Active' 在这里可以当唯一真值：已定案单位的该 stat 由
--- hook/lua/sim/Unit.lua 的 M28AssistProject 投影；未定案单位（ACU、剧本生成）
--- 也在同一个函数里跟着 M28AI 的字段同步，所以它永远等于 sim 侧的真实状态。
+-- ============ v15：勾选状态不再依赖「读 sim」 ============
+-- 按以下优先级决定，每一层都不需要网络往返：
+--   1) 本局点击记忆 —— 玩家亲手点过的单位，记住他点出来的状态（唯一权威来源）；
+--   2) stat 为 1 —— sim 明确说「在托管」，这个方向不会误判；
+--   3) 建造者的点击记忆 —— 复现 sim 的继承规则（产物跟着建造者走）；
+--   4) stat 为 0。
+-- 四层都读不到时保持按钮当前的样子，绝不把按钮强行画成「关」。
+--
+-- 同时去掉 onframe：勾选只在选择变化时算一次（initialStateFunc），点击时立刻按
+-- 目标状态重画。没有逐帧重算，就不存在「重算把点击结果抹掉」的窗口，也不再需要
+-- 给按钮挂那个会一直呼吸的光效（AddOrder 只在有 onframe 时才创建它）。
 --
 -- 装载约束：本文件被 SCR_LuaDoFileConcat 追加到 lua/ui/game/orders.lua 末尾，
 -- 因此 defaultOrdersTable / currentSelection / controls 都在同一个 chunk 里可见。
@@ -45,41 +50,129 @@ if bM28AssistGotTable and type(tM28AssistTable) == 'table' then
 end
 
 if type(tM28AssistOrderInfo) == 'table' then
-    local M28AssistHoldWarned = false
     local iM28AssistClickLogs = 0
+    local iM28AssistSelectLogs = 0
 
-    -- 读一个单位当前的托管状态：true / false；读不到返回 nil（不参与统计）。
-    local function M28AssistReadState(oUnit)
-        if not oUnit then return nil end
-        if type(oUnit.GetStat) ~= 'function' then return nil end
-        if oUnit.Dead == true then return nil end
-        local vStat = oUnit:GetStat('M28Active', 0)
-        if vStat == nil then return nil end
-        local iValue = 0
-        if type(vStat) == 'table' then
-            iValue = tonumber(vStat.Value or 0) or 0
-        elseif type(vStat) == 'number' then
-            iValue = vStat
-        else
+    -- 点击记忆：entityId -> { b = 状态, s = 蓝图 id }
+    -- 只在玩家点击时写，不随时间失效；这是本文件唯一的权威来源。
+    local tM28AssistClicked = {}
+
+    local function M28AssistEntityId(oUnit)
+        if oUnit == nil or type(oUnit.GetEntityId) ~= 'function' then return nil end
+        local iId = oUnit:GetEntityId()
+        if type(iId) ~= 'number' then return nil end
+        return iId
+    end
+
+    local function M28AssistBlueprintId(oUnit)
+        if oUnit == nil or type(oUnit.GetUnitId) ~= 'function' then return nil end
+        local sId = oUnit:GetUnitId()
+        if sId == nil then return nil end
+        return tostring(sId)
+    end
+
+    -- 读点击记忆：true / false；没有记录返回 nil。
+    local function M28AssistFromMemory(oUnit)
+        local iId = M28AssistEntityId(oUnit)
+        if iId == nil then return nil end
+        local tRecord = tM28AssistClicked[iId]
+        if tRecord == nil then return nil end
+        -- entityId 会被引擎复用；蓝图对不上就当这条记忆属于另一个单位
+        local sId = M28AssistBlueprintId(oUnit)
+        if tRecord.s ~= nil and sId ~= nil and tRecord.s ~= sId then
+            tM28AssistClicked[iId] = nil
             return nil
         end
+        return tRecord.b == true
+    end
+
+    local function M28AssistRemember(oUnit, bState)
+        local iId = M28AssistEntityId(oUnit)
+        if iId == nil then return false end
+        tM28AssistClicked[iId] = { b = (bState == true), s = M28AssistBlueprintId(oUnit) }
+        return true
+    end
+
+    -- 读 stat：true / false / nil（nil = 这个单位读不到该 stat）。
+    local function M28AssistFromStat(oUnit)
+        if oUnit == nil or type(oUnit.GetStat) ~= 'function' then return nil end
+        local vStat = oUnit:GetStat('M28Active', 0)
+        if vStat == nil then return nil end
+        local iValue = nil
+        if type(vStat) == 'table' then
+            iValue = tonumber(vStat.Value)
+        elseif type(vStat) == 'number' then
+            iValue = vStat
+        end
+        if iValue == nil then return nil end
         return iValue ~= 0
     end
 
-    -- 统计一组单位的托管状态，提前退出。返回 bAnyOn, bAnyOff。
-    local function M28AssistScan(oUnits)
-        local bAnyOn, bAnyOff = false, false
-        if type(oUnits) ~= 'table' then return bAnyOn, bAnyOff end
-        for i, oUnit in oUnits do
-            local bState = M28AssistReadState(oUnit)
-            if bState == true then
-                bAnyOn = true
-            elseif bState == false then
-                bAnyOff = true
-            end
-            if bAnyOn and bAnyOff then break end
+    -- 建造者被玩家点过时，产物沿用同一状态（sim 侧的继承规则就是这样）。
+    -- 往上找几层：玩家点的是工厂，工厂造的工程车再造出来的东西属于「两跳继承」，
+    -- 只查一层的话这些单位会被显示成暗的。
+    local function M28AssistFromCreator(oUnit)
+        if oUnit == nil or type(oUnit.GetCreator) ~= 'function' then return nil end
+        local oCurrent = oUnit
+        for iStep = 1, 4 do
+            if oCurrent == nil or type(oCurrent.GetCreator) ~= 'function' then return nil end
+            local oCreator = oCurrent:GetCreator()
+            if oCreator == nil or oCreator == oCurrent then return nil end
+            local bMemory = M28AssistFromMemory(oCreator)
+            if bMemory ~= nil then return bMemory end
+            oCurrent = oCreator
         end
-        return bAnyOn, bAnyOff
+        return nil
+    end
+
+    -- 读一个单位当前的托管状态：true / false；读不到返回 nil。
+    local function M28AssistReadState(oUnit)
+        if oUnit == nil or oUnit.Dead == true then return nil end
+        local bMemory = M28AssistFromMemory(oUnit)
+        if bMemory ~= nil then return bMemory end
+
+        -- stat 为 1 是 sim 的明确肯定，任何情况下都可以信
+        local bStat = M28AssistFromStat(oUnit)
+        if bStat == true then return true end
+
+        local bCreator = M28AssistFromCreator(oUnit)
+        if bCreator ~= nil then return bCreator end
+
+        return bStat
+    end
+
+    -- 统计一组单位的状态，返回 bAnyOn, bAnyOff, iRead。
+    -- iRead 为 0 表示一个都没读到：调用方应保持按钮现状，不要画成「关」。
+    local function M28AssistScan(oUnits)
+        local bAnyOn, bAnyOff, iRead = false, false, 0
+        if type(oUnits) ~= 'table' then return bAnyOn, bAnyOff, iRead end
+        for i, oUnit in oUnits do
+            -- 逐单位 pcall：某个单位正在被销毁时不该让整次刷新作废
+            local bOK, bState = pcall(M28AssistReadState, oUnit)
+            if bOK and bState ~= nil then
+                iRead = iRead + 1
+                if bState == true then
+                    bAnyOn = true
+                else
+                    bAnyOff = true
+                end
+            end
+        end
+        return bAnyOn, bAnyOff, iRead
+    end
+
+    -- 诊断用：统计这组单位里「原始 stat 为 1」和「命中点击记忆」的数量。
+    -- 只在选择日志里调用（限流 12 次），不进热路径。
+    -- 下一次实机的日志就能区分两种失败：rawstat=0 说明 sim 侧没写成或没同步回来；
+    -- rawstat>0 但按钮仍然暗，说明读到了却没用上。
+    local function M28AssistProbe(oUnits)
+        local iStat, iMem = 0, 0
+        if type(oUnits) ~= 'table' then return iStat, iMem end
+        for i, oUnit in oUnits do
+            if M28AssistFromMemory(oUnit) ~= nil then iMem = iMem + 1 end
+            if M28AssistFromStat(oUnit) == true then iStat = iStat + 1 end
+        end
+        return iStat, iMem
     end
 
     -- 把状态写到按钮上，并维护混合选择的问号图标。
@@ -99,89 +192,25 @@ if type(tM28AssistOrderInfo) == 'table' then
         end
     end
 
-    -- 选择集变化时由框架调用一次。
-    --
-    -- 同时把 AddOrder 为 onframe 按钮挂上的脉冲光效关掉：那个 EnableEffect 在
-    -- OnEnable 时会一直呼吸（alpha 在 0/1 间循环），而 M28 按钮几乎一直是启用
-    -- 状态，会变成永久的闪动。我们只需要 OnFrame 来刷新勾选，不要这个装饰。
+    -- 选择集变化时由框架调用一次（CreateAltOrders 里，currentSelection 已经先更新）。
     tM28AssistOrderInfo.initialStateFunc = function(control, unitList, subCheck)
-        if not control.M28AssistEffectMuted then
-            control.M28AssistEffectMuted = true
-            if control.EnableEffect then
-                control.EnableEffect:SetNeedsFrameUpdate(false)
-                control.EnableEffect:SetAlpha(0)
-            end
-            control.OnEnable = function(self)
-                if self.EnableEffect then
-                    self.EnableEffect:SetNeedsFrameUpdate(false)
-                    self.EnableEffect:SetAlpha(0)
-                end
-                Checkbox.OnEnable(self)
-            end
-            control.OnDisable = function(self)
-                if self.EnableEffect then
-                    self.EnableEffect:SetNeedsFrameUpdate(false)
-                    self.EnableEffect:SetAlpha(0)
-                end
-                Checkbox.OnDisable(self)
-            end
-        end
-
-        local bAnyOn, bAnyOff = M28AssistScan(unitList)
+        local bAnyOn, bAnyOff, iRead = M28AssistScan(unitList)
         if not subCheck then
-            M28AssistApply(control, bAnyOn, bAnyOff)
+            -- 一个都没读到就保持原样：画成「关」比留着旧值更容易误导人
+            if iRead > 0 then
+                M28AssistApply(control, bAnyOn, bAnyOff)
+            end
+            if iM28AssistSelectLogs < 12 then
+                iM28AssistSelectLogs = iM28AssistSelectLogs + 1
+                local iStat, iMem = M28AssistProbe(unitList)
+                LOG('M28CampaignAssist: select read=' .. tostring(iRead)
+                    .. ' on=' .. tostring(bAnyOn)
+                    .. ' off=' .. tostring(bAnyOff)
+                    .. ' rawstat=' .. tostring(iStat)
+                    .. ' mem=' .. tostring(iMem))
+            end
         else
             return bAnyOn, bAnyOn and bAnyOff
-        end
-    end
-
-    -- 每帧刷新。M28AI 原版只在选中那一刻算一次，选着不动就会长期显示旧值。
-    -- 节流到 0.1 秒：几十个单位的 GetStat 不值得每帧跑，而人的反应也快不过它。
-    --
-    -- 关键：点击之后必须有一段「等待窗口」。
-    -- UI 读的 stat 是从 sim 侧同步过来的，一次点击要先经 SimCallback 到 sim、
-    -- 由 M28AI 的宿主回调写 stat、再同步回 UI，通常要几十到几百毫秒。这期间
-    -- 扫描到的仍是旧值；如果照常刷新，就会把刚画出来的勾选立刻抹掉，表现就是
-    -- 「点了一点反应都没有、看不出亮暗变化」。等待窗口里只要 stat 还没跟上，
-    -- 就保持点击时画的状态；一旦跟上（或超时）立刻交还给自动刷新。
-    tM28AssistOrderInfo.onframe = function(control, deltaTime)
-        local fDelta = deltaTime or 0.1
-        -- 累加器挂在按钮自己身上，不占文件级 local，也不会被别的按钮干扰
-        local fAccum = (control.M28AssistAccum or 0) + fDelta
-        if fAccum < 0.1 then
-            control.M28AssistAccum = fAccum
-            return
-        end
-        control.M28AssistAccum = 0
-        if type(currentSelection) ~= 'table' then return end
-
-        local bAnyOn, bAnyOff = M28AssistScan(currentSelection)
-
-        local fHold = control.M28AssistHoldTime
-        if fHold ~= nil and fHold > 0 then
-            if bAnyOn ~= control.M28AssistHoldTarget then
-                fHold = fHold - fDelta
-                if fHold > 0 then
-                    control.M28AssistHoldTime = fHold
-                    return   -- stat 尚未同步回来，保持点击时画的状态
-                end
-                -- 等待超时：sim 侧始终没写成，放弃本地覆盖，显示真实值
-                control.M28AssistHoldTime = nil
-                control.M28AssistHoldTarget = nil
-                if not M28AssistHoldWarned then
-                    M28AssistHoldWarned = true
-                    LOG('M28CampaignAssist: toggle visual hold expired; the M28Active stat never followed the click')
-                end
-            else
-                -- stat 已经跟上，交还给自动刷新
-                control.M28AssistHoldTime = nil
-                control.M28AssistHoldTarget = nil
-            end
-        end
-
-        local bMixed = (bAnyOn and bAnyOff) == true
-        if control:IsChecked() ~= bAnyOn or (control._mixedIcon ~= nil) ~= bMixed then
-            M28AssistApply(control, bAnyOn, bAnyOff)
         end
     end
 
@@ -192,15 +221,9 @@ if type(tM28AssistOrderInfo) == 'table' then
             -- 框架以程序方式切换时才信它；玩家点击时 subState 为 nil。
             bTarget = (subState == true)
         else
-            -- 上一次点击的目标值比 stat 更权威：stat 还没同步回来时，
-            -- 连续点击必须基于「上一次点出来的状态」取反，否则连点两次
-            -- 会连发两次同一个值，用户看到的就是「点了没反应」。
-            local bCurrent
-            if self.M28AssistHoldTarget ~= nil then
-                bCurrent = (self.M28AssistHoldTarget == true)
-            else
-                bCurrent = M28AssistScan(currentSelection)
-            end
+            local bAnyOn, bAnyOff, iRead = M28AssistScan(currentSelection)
+            local bCurrent = false
+            if iRead > 0 then bCurrent = bAnyOn end
             -- 与 M28AI 原版语义一致：只要还有单位在托管就整组收回，否则整组交出。
             bTarget = not bCurrent
         end
@@ -217,27 +240,31 @@ if type(tM28AssistOrderInfo) == 'table' then
             controls.mouseoverDisplay.text:SetText(self._curHelpText)
         end
 
-        -- 立刻给出视觉反馈，不用等下一帧 onframe。
-        -- 随后开一个等待窗口：stat 从 sim 同步回来之前，onframe 不许覆盖它，
-        -- 否则刚点出来的亮/暗会在 0.1 秒后被旧值抹掉（这就是「看不到变化」）。
+        -- 记下玩家这次点出来的状态。此后无论 stat 同步得怎么样，只要单位还在，
+        -- 勾选就按这里显示 —— 这是 v15 的核心：不依赖那次网络往返。
+        local iRemembered = 0
+        if subState == nil and type(currentSelection) == 'table' then
+            for i, oUnit in currentSelection do
+                if M28AssistRemember(oUnit, bTarget) then
+                    iRemembered = iRemembered + 1
+                end
+            end
+        end
+
         if subState == nil then
             self:SetCheck(bTarget)
-            self.M28AssistHoldTarget = bTarget
-            self.M28AssistHoldTime = 2.0
         end
 
         -- Enable 是「点击后应处于的状态」，hook/lua/SimCallbacks.lua 会把它写成权威值。
         SimCallback({ Func = 'M28SharedArmiesCallback', Args = { Enable = bTarget } }, true)
 
-        -- 诊断：确认 UI 侧读到的 stat 与点击意图是否对得上（限流 30 条）。
+        -- 诊断：确认这次的点击意图与记录下来的人数（限流 30 条）。
         if subState == nil and iM28AssistClickLogs < 30 then
             iM28AssistClickLogs = iM28AssistClickLogs + 1
-            local iUnits = 0
-            for i, oUnit in currentSelection or {} do iUnits = iUnits + 1 end
             LOG('M28CampaignAssist: click target=' .. tostring(bTarget)
-                .. ' selected=' .. tostring(iUnits))
+                .. ' remembered=' .. tostring(iRemembered))
         end
     end
 
-    LOG('M28CampaignAssist: M28 toggle button bound to authoritative state')
+    LOG('M28CampaignAssist: M28 toggle button bound to click memory')
 end

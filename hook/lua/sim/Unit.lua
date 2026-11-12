@@ -1,7 +1,21 @@
 -- M28CampaignAssist（M28AI 附属 mod）
--- hook/lua/sim/Unit.lua  -- v12
+-- hook/lua/sim/Unit.lua  -- v15
 --
 -- 目标：让「逐单位托管」像基因一样由建造者传给产物，并且按钮永远反映真实状态。
+--
+-- ============ v15：登记表恒为 0，整条投影链从未跑过 ============
+-- 实测日志从第一轮起就是 `slots=0 alive=0 pending=390`：390 个单位进了待解析队列
+-- （所以有 inherit 日志），却一个都没进登记表，于是 M28AssistProject 一次都没执行
+-- ——M28Active 和两个 UI stat 从未被维护过。
+-- 原因在 M28AssistTrackUnit：它在单位 OnCreate 的那一刻就读 brain，并据此直接筛掉
+-- 「非 Human」的单位。但创建瞬间 brain 往往还是临时的那个，于是玩家自己的单位也被
+-- 当成敌方单位永久排除，之后没有任何补登记的机会。
+-- 修法：
+--   1) 登记与身份判定解耦：OnCreate 一律登记，身份交给对账循环里的
+--      M28AssistConfirmHuman 判；
+--   2) 非 Human 不再当场判死，连续几个周期（iM28AssistNonHumanRounds）都不是玩家
+--      brain 才摘掉，判明前不计入存活数、不做投影；
+--   3) 心跳日志加 `wait=`，下一次实机就能看到「待判定」有多少。
 --
 -- ============ v12：任务结束阶段的崩溃（两次 0xc0000005，同一函数） ============
 -- 两次崩溃的偏移（0x5173b3 / 0x517939 / 0x51797b）都落在引擎同一个例程里，
@@ -87,6 +101,8 @@ local iM28AssistPendingMaxRounds = 3    -- 新单位最多等几轮才放弃找�
 local iM28AssistShowStatEvery = 3       -- 按钮可见性 stat 每几轮全量查一次
 local iM28AssistMaxLogs = 200           -- 继承判定日志上限（仅防日志爆炸）
 local iM28AssistHumanChecks = 15        -- 每个单位最多复核几次 brain（之后不再花钱）
+local iM28AssistNonHumanRounds = 6      -- brain 连续几轮不是 Human 才判定「不是玩家的」
+local iM28AssistUntrackLogs = 0         -- 摘除日志计数（仅防日志爆炸）
 local iM28AssistMassLossMin = 40        -- 规模达到这个数才启用「成批消失」判定
 local iM28AssistMassLossSleep = 20      -- 判定为世界正在销毁后停手多少秒
 
@@ -420,24 +436,38 @@ local function M28AssistConfirmHuman(oUnit)
         return nil
     end
 
-    oUnit.M28AssistBrainChecked = true
-    oUnit.M28AssistHumanOK = (oBrain.BrainType == 'Human')
-    return oUnit.M28AssistHumanOK
+    if oBrain.BrainType == 'Human' then
+        oUnit.M28AssistBrainChecked = true
+        oUnit.M28AssistHumanOK = true
+        return true
+    end
+
+    -- 非 Human 不能当场判死：单位刚生成的瞬间，brain 往往还是临时的那个。
+    -- 实测开局 390 个单位的 OnCreate 全部落在这一支，登记表因此恒为 0，
+    -- 整条投影链（M28Active 与两个 UI stat 的维护）一次都没跑过。
+    -- 给几个周期宽限，之后仍然不是玩家 brain 才摘掉。
+    local iRounds = (oUnit.M28AssistNonHumanRounds or 0) + 1
+    oUnit.M28AssistNonHumanRounds = iRounds
+    if iRounds >= iM28AssistNonHumanRounds then
+        oUnit.M28AssistBrainChecked = true
+        oUnit.M28AssistHumanOK = false
+        return false
+    end
+    return nil
 end
 
 -- 槽位分配：优先复用死亡单位留下的槽位，避免登记表无限增长。
 local function M28AssistTrackUnit(oUnit)
     if oUnit.M28AssistSlot ~= nil then return end
 
-    -- 只登记玩家自己的单位。M28 的逐单位托管只对人类 brain 有意义，而本 mod 的
-    -- 对账每轮要给每个登记单位读写 UI stat。把敌方 AI 的上千个单位一并纳进来
-    -- 是纯浪费（实测一局 slots=2487，玩家自己的单位只有几百），而且任务结束、
-    -- 引擎批量销毁单位时这轮遍历还在跑，等于在清理窗口里持续调用 C 接口。
-    -- 这一刻 brain 可能还没挂上，那就先登记，交给对账循环里的 M28AssistConfirmHuman
-    -- 补判（判完不是玩家单位就摘掉）。
-    if type(oUnit.GetAIBrain) ~= 'function' then return end
-    local oBrain = oUnit:GetAIBrain()
-    if oBrain ~= nil and oBrain.BrainType ~= 'Human' then return end
+    -- 先登记，身份交给对账循环里的 M28AssistConfirmHuman 判定。
+    -- 不能在 OnCreate 里按 brain 直接筛掉：那一刻 brain 常常还不是玩家的，
+    -- 筛掉之后再也没有机会补登记（实测 slots=0）。
+    -- 代价只是「新建单位会在表里存活几个周期」，判明不是玩家单位后立即回收。
+    local oBrain = nil
+    if type(oUnit.GetAIBrain) == 'function' then
+        oBrain = oUnit:GetAIBrain()
+    end
 
     local iSlot
     if iM28AssistFreeCount > 0 then
@@ -450,7 +480,8 @@ local function M28AssistTrackUnit(oUnit)
     end
     tM28AssistSlots[iSlot] = oUnit
     oUnit.M28AssistSlot = iSlot
-    if oBrain ~= nil then
+    oUnit.M28AssistNonHumanRounds = 0
+    if oBrain ~= nil and oBrain.BrainType == 'Human' then
         oUnit.M28AssistBrainChecked = true
         oUnit.M28AssistHumanOK = true
     else
@@ -537,10 +568,10 @@ local function M28AssistResolvePending()
     return iResolved, iWrite
 end
 
--- 一轮完整的对账。返回：定案数、剩余待解析数、存活数、修正数、新登记数。
+-- 一轮完整的对账。返回：定案数、剩余待解析数、存活数、修正数、新登记数、待判定数。
 -- 整轮由外层 pcall 保护，任何单个单位出错都不会杀死唯一的线程。
 local function M28AssistReconcileRound()
-    if not M28AssistInheritEnabled() then return 0, 0, 0, 0, 0 end
+    if not M28AssistInheritEnabled() then return 0, 0, 0, 0, 0, 0 end
 
     local iResolved, iPending = M28AssistResolvePending()
 
@@ -554,18 +585,26 @@ local function M28AssistReconcileRound()
     -- 静默期一轮本来就是几秒，索性每轮都查一次，缩短按钮恢复窗口
     if iM28AssistQuiet >= iM28AssistQuietRounds then bCheckShow = true end
 
-    local iAlive, iFixed = 0, 0
+    local iAlive, iFixed, iWait = 0, 0, 0
     for i = 1, iM28AssistSlotTop do
         local oUnit = tM28AssistSlots[i]
         if oUnit ~= nil and oUnit ~= false then
             if oUnit.Dead then
                 M28AssistDropSlot(i, oUnit)
             else
-                -- 迟到的身份复核：OnCreate 时 brain 若还没挂上，敌方单位也会被登记。
-                -- 判明不是玩家单位就摘掉，别再为它花每轮一次的 C 调用。
+                -- 迟到的身份复核：OnCreate 时 brain 往往还不是玩家的，敌方单位也会被登记。
+                -- 判明不是玩家单位才摘掉；还没判明的先挂着，既不投影也不计入存活数
+                -- （存活数用来判断「世界正在销毁」，不能被这批临时条目污染）。
                 local bHuman = M28AssistConfirmHuman(oUnit)
                 if bHuman == false then
+                    if iM28AssistUntrackLogs < 6 then
+                        iM28AssistUntrackLogs = iM28AssistUntrackLogs + 1
+                        M28AssistLog('untrack ' .. M28AssistUnitLabel(oUnit)
+                            .. ' (not a player unit)')
+                    end
                     M28AssistDropSlot(i, oUnit)
+                elseif bHuman == nil then
+                    iWait = iWait + 1
                 else
                     iAlive = iAlive + 1
                     local bOK, bFixed = pcall(M28AssistReconcileUnit, oUnit, bCheckShow)
@@ -604,21 +643,22 @@ local function M28AssistReconcileRound()
         M28AssistLog('reconcile round=' .. tostring(iM28AssistRound)
             .. ' slots=' .. tostring(iM28AssistSlotTop)
             .. ' alive=' .. tostring(iAlive)
+            .. ' wait=' .. tostring(iWait)
             .. ' pending=' .. tostring(iPending)
             .. ' fixed=' .. tostring(iFixed)
             .. ' quiet=' .. tostring(iM28AssistQuiet))
     end
 
-    return iResolved, iPending, iAlive, iFixed, iNew
+    return iResolved, iPending, iAlive, iFixed, iNew, iWait
 end
 
 -- 跑一轮并更新心跳/静默计数。返回 true 表示「该退出了」。
 local function M28AssistTickOnce(iGeneration)
     local iRoundBefore = iM28AssistRound
-    local bOK, a, b, c, d, e = pcall(M28AssistReconcileRound)
-    local iResolved, iPending, iAlive, iFixed, iNew = 0, 0, 0, 0, 0
+    local bOK, a, b, c, d, e, f = pcall(M28AssistReconcileRound)
+    local iResolved, iPending, iAlive, iFixed, iNew, iWait = 0, 0, 0, 0, 0, 0
     if bOK and a then
-        iResolved, iPending, iAlive, iFixed, iNew = a, b, c, d, e
+        iResolved, iPending, iAlive, iFixed, iNew, iWait = a, b, c, d, e, f
     elseif not bM28AssistWarned then
         bM28AssistWarned = true
         M28AssistLog('reconcile round failed: ' .. tostring(a))
@@ -626,7 +666,7 @@ local function M28AssistTickOnce(iGeneration)
 
     iM28AssistLastBeat = M28AssistNow()
 
-    if iFixed > 0 or iResolved > 0 or iPending > 0 or iNew > 0 then
+    if iFixed > 0 or iResolved > 0 or iPending > 0 or iNew > 0 or iWait > 0 then
         iM28AssistQuiet = 0
     else
         iM28AssistQuiet = iM28AssistQuiet + 1
@@ -638,11 +678,13 @@ local function M28AssistTickOnce(iGeneration)
     -- 结束或切图，引擎正在成批销毁单位。以前要再空转 20 轮（约 20 秒）才退出，
     -- 这段时间正好落在清理窗口里。直接停掉，别和引擎抢。
     -- 只在「本轮确实跑过对账」时判断，否则选项被关掉时返回的全 0 会误触发。
+    -- 待判定单位（brain 还没换过来）也算「还有活干」，否则开局那一秒会误判成世界
+    -- 已经销毁：线程退出后只能等下一次建造动作重启，每重启一次只推进一轮。
     local bRoundRan = (iM28AssistRound > iRoundBefore)
-    local bWorldGone = bRoundRan and iAlive == 0 and iPending == 0
+    local bWorldGone = bRoundRan and iAlive == 0 and iPending == 0 and iWait == 0
         and iM28AssistSlotTop > 100
     if bWorldGone
-        or (iAlive == 0 and iPending == 0 and iM28AssistQuiet >= iM28AssistExitRounds) then
+        or (iAlive == 0 and iPending == 0 and iWait == 0 and iM28AssistQuiet >= iM28AssistExitRounds) then
         if iGeneration == iM28AssistGeneration then
             bM28AssistThreadAlive = false
             M28AssistLog('reconcile thread idle, exiting')
@@ -667,11 +709,11 @@ local function M28AssistReconcileLoop(iGeneration)
             WaitTicks(iM28AssistQuietTicks)
         else
             if M28AssistTickOnce(iGeneration) then return end
-            local iWait = iM28AssistActiveTicks
+            local iWaitTicks = iM28AssistActiveTicks
             if iM28AssistQuiet >= iM28AssistQuietRounds then
-                iWait = iM28AssistQuietTicks
+                iWaitTicks = iM28AssistQuietTicks
             end
-            WaitTicks(iWait)
+            WaitTicks(iWaitTicks)
         end
     end
 end

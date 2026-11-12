@@ -208,7 +208,7 @@ command threads; an exception escaping one of them kills that thread, which look
 "a group of units stopped doing anything". Failing safe now means falling back to M28AI's
 original behaviour for that one call.
 
-### Why the toggle button could read "on" while the unit was off (v13)
+### Why the toggle button could read "on" while the unit was off (v13 → v15)
 
 M28AI's button (`M28AI/hook/lua/ui/game/orders.lua`) trusts the screen:
 
@@ -217,33 +217,57 @@ M28AI's button (`M28AI/hook/lua/ui/game/orders.lua`) trusts the screen:
 - `M28AIToggle` reads `self:IsChecked()` — that same, possibly stale tick — and sends
   `Enable = not state` to the sim.
 
-Once this addon started projecting an authoritative state onto that stat, the two diverged in a
-visible way. The reconciler corrects a unit's stat up to a second after you select it, but the
-button keeps showing whatever it read at selection time. A click then inverts the stale value, so
-the same click can turn a unit on or off depending on how old the icon is — the button feels
-"sticky" and occasionally does the opposite of what it looks like. Mixed selections are worse:
-the original code shows a tick whenever *any* selected unit is taken over, and a click sends one
-value for the whole group.
+So a click inverts *whatever the icon happens to show*, which can be the opposite of the real
+state: the button feels "sticky" and occasionally does the opposite of what it looks like. Mixed
+selections are worse: the original code shows a tick whenever *any* selected unit is taken over,
+and a click sends one value for the whole group.
 
-v13 replaces three callbacks on the `M28Toggle` entry of `defaultOrdersTable`, without touching
-M28AI:
+The first attempt (v13/v14) recomputed the tick ten times a second from the `M28Active` stat. That
+does not work in campaign, for two reasons:
 
-- The tick is recomputed about ten times a second from the current selection, using the engine's
-  own per-button frame hook (`AddOrder` calls `SetNeedsFrameUpdate` for any order that carries an
-  `onframe`). The decorative pulse effect that comes with that hook is muted — the button is
-  enabled almost permanently and would otherwise blink forever.
-- A click no longer inverts the drawn tick. It re-reads the stat on the spot, sends the state the
-  unit should **end up** in, and paints the button to match immediately.
-- The fresh paint is then **held** until the stat catches up. This is the part v13 got wrong:
-  the stat has to travel to the sim and back, so for the first 0.1 s the refresh still sees the
-  pre-click value and overwrites the tick — the button looked like it ignored the click. The
-  hold lasts at most two seconds and logs `toggle visual hold expired` if the stat never follows.
-  A second click inside that window inverts the held target, not the stale stat, so double-click
-  really does mean on-then-off.
-- Units with no builder (ACU, mission-spawned, gifted) are now mirrored from M28AI's own
-  `M28Active` field inside `M28AssistProject` instead of being left alone. `M28Events.lua:3796`
-  writes only the stat when it clears a unit and never clears the field, so "field true / stat 0"
-  could persist indefinitely — the button showed off while the unit was being managed.
+- The stat has to travel UI → sim → UI. After a click, the refresh still reads the pre-click value
+  for a moment and repaints the tick back, so the button looks like it ignored the click. v14 tried
+  to paper over this with a two-second "hold window".
+- More importantly, `M28Active` is not an engine stat. It is not declared in
+  `Blueprint.General.StatToggles` (the official `SetStatByCallback` refuses anything else); M28AI
+  creates it at runtime with `UpdateStat`. The engine's sync layer does not treat such a stat the
+  way it treats a blueprint stat, so it does not reliably come back to the UI at all. Re-selecting
+  the unit read 0 again and the icon stayed dark, no matter what had been clicked.
+
+v15 stops reading the sim for the tick. The state is resolved in four layers, none of which needs a
+round trip:
+
+1. **Click memory** — what you clicked for this unit id, for the rest of the session. Authoritative.
+2. **`M28Active` == 1** — a positive statement from the sim, trustworthy in that direction.
+3. **The builder's click memory** — reproduces the sim's inheritance rule, so a unit built by a
+   factory you took over shows as taken over.
+4. **`M28Active` == 0.**
+
+If none of the four yields a value (unit not synced yet, dying, unknown), the button keeps whatever
+it currently shows. It is never forced to "off" on a failed read, which is what made the old icon
+look permanently dark.
+
+`onframe` is gone. The tick is computed once per selection change and painted immediately on click,
+so there is no window in which a refresh can undo a click. That also removes the per-button frame
+hook and the decorative pulse that came with it.
+
+### Why the projection never ran (v15)
+
+The reconcile heartbeat read `slots=0 alive=0 pending=390` from the first round of a real session.
+Units were reaching the pending queue (hence the `inherit` lines) but never the registry, so
+`M28AssistProject` — the only thing that maintains `M28Active` and the two UI stats — had never
+executed once.
+
+The cause was in `M28AssistTrackUnit`: it read the unit's brain at `OnCreate` and dropped anything
+whose `BrainType` was not `'Human'`. At creation time the brain is usually still the temporary one,
+so the player's own units were classified as enemy units and excluded permanently; nothing ever
+re-registered them.
+
+Registration and identification are now separate steps: every unit is registered, and the
+reconcile pass decides. A unit that reads as non-human is kept for a few passes
+(`iM28AssistNonHumanRounds`) before being dropped, and while undecided it is neither projected nor
+counted in the alive tally (that tally drives the end-of-mission teardown brake, which must not be
+polluted by transient entries). The heartbeat now prints `wait=`, the number of undecided entries.
 
 ### Behaviour tuning (v8)
 
@@ -374,10 +398,11 @@ M28CampaignAssist: set ScenarioInfo.Options.M28CombinedArmy=1 for scenario type=
 M28CampaignAssist: set ScenarioInfo.Options.M28CAInherit=1 for scenario type=campaign
 M28CampaignAssist: set ScenarioInfo.Options.M28Aggression=0.6 for scenario type=campaign
 M28CampaignAssist: toggle callback hooked
-M28CampaignAssist: M28 toggle button bound to authoritative state
-M28CampaignAssist: click target=false selected=1
+M28CampaignAssist: M28 toggle button bound to click memory
+M28CampaignAssist: select read=1 on=false off=true rawstat=0 mem=0
+M28CampaignAssist: click target=true remembered=1
 M28CampaignAssist: reconcile thread started (generation 1)
-M28CampaignAssist: reconcile round=1 slots=... alive=... pending=... fixed=... quiet=0
+M28CampaignAssist: reconcile round=1 slots=... alive=... wait=... pending=... fixed=... quiet=0
 M28CampaignAssist: toggle Enable=true applied to 1 unit(s)
 M28CampaignAssist: inherit <unit id> <- <builder id> managed=true (builderManaged=true, builderActive=true, builderHuman=true)
 M28CampaignAssist: retreat micro disabled for human campaign land combat units
@@ -394,16 +419,23 @@ What to check:
   "player intent comes from clicks only" mode, so this line is what keeps a finished factory
   from being mistaken for a manual shutdown. If it says `Callbacks table unavailable`, the
   state-sniffing fallback takes over instead — still usable, but report it.
-- `M28 toggle button bound to authoritative state` confirms v13 replaced the button's
-  `initialStateFunc` / `onframe` / `behavior` hooks. If it is missing, the old M28AI button is
-  still in charge: the toggle keeps working, but it will go stale again while units stay selected.
-- `click target=... selected=...` is printed on each click (capped at 30 lines). `target` is what
-  the click decided the new state should be; `selected` is how many units were selected. If a
-  click on a taken-over unit reports `target=true` instead of `false`, the UI could not read the
-  stat and the hold is papering over it — send the log.
-- `toggle visual hold expired` means the button was painted one way and the `M28Active` stat
-  never followed within two seconds, so the icon snapped back. Once is worth reporting: it means
-  the sim-side write did not happen.
+- `M28 toggle button bound to click memory` confirms v15 replaced the button's
+  `initialStateFunc` and `behavior` hooks. If it is missing, the old M28AI button is still in
+  charge: the toggle keeps working, but the icon goes stale again while units stay selected.
+- `select read=N on=... off=... rawstat=N mem=N` is printed for each selection change (capped at 12
+  lines). `read` is how many units yielded a state; `read=0` means nothing was readable and the
+  button was left alone rather than forced to "off". `rawstat` counts units whose raw `M28Active`
+  stat is 1, ignoring the click memory; `mem` counts units with a click memory entry. These two
+  numbers separate the two possible failures: `rawstat=0` on a unit you just toggled on means the
+  sim never wrote the stat, or the engine never synced it back; `rawstat>0` with a dark button
+  means the value was read but not used.
+- `click target=... remembered=N` is printed on each click (capped at 30 lines). `target` is the
+  state the click decided on, `remembered` is how many units went into the click memory. If
+  `remembered=0`, the selection had no entity ids and the tick cannot be remembered.
+- `reconcile round=... slots=... alive=... wait=...` heartbeats (first round, then every 30 passes)
+  prove the projection is running. `slots` must be non-zero in a normal game — a permanent
+  `slots=0` means nothing is being tracked and no unit is ever projected. `wait` counts units
+  registered but not yet identified as yours; it should fall back to 0 within a second.
 - `M28CombinedArmy vanished mid-game; restored to 1` means the campaign rebuilt
   `ScenarioInfo.Options` mid-session and the addon put the key back. Harmless, expected once
   per rebuild; without it every taken-over unit would silently stop being projected.
