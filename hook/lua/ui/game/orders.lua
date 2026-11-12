@@ -169,8 +169,15 @@ if type(tM28AssistOrderInfo) == 'table' then
         local iStat, iMem = 0, 0
         if type(oUnits) ~= 'table' then return iStat, iMem end
         for i, oUnit in oUnits do
-            if M28AssistFromMemory(oUnit) ~= nil then iMem = iMem + 1 end
-            if M28AssistFromStat(oUnit) == true then iStat = iStat + 1 end
+            -- 逐单位 pcall：这里只写日志，绝不能因为一个正在销毁的单位
+            -- 把异常抛回 CreateAltOrders（那会连整个按钮创建一起失败）
+            local bOK, bStat, bMem = pcall(function()
+                return M28AssistFromStat(oUnit) == true, M28AssistFromMemory(oUnit) ~= nil
+            end)
+            if bOK then
+                if bStat then iStat = iStat + 1 end
+                if bMem then iMem = iMem + 1 end
+            end
         end
         return iStat, iMem
     end
