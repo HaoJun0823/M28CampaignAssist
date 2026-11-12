@@ -27,7 +27,15 @@ M28AI then reads a missing option, falls back to `tonumber(... or 2)` — which 
 *disabled* — and consequently neither shows the toggle button nor registers your brain as an
 M28 brain. The feature is effectively dead in campaign, no matter that the mod is loaded.
 
-This mod fills that single field with `1` in campaign sessions, before M28AI reads it.
+This mod fills two fields with `1` in campaign sessions, before M28AI reads them:
+
+| Option | Effect |
+|---|---|
+| `M28CombinedArmy` | enables the per-unit takeover button |
+| `M28CAInherit` | enables inheritance: whatever a taken-over unit builds is taken over too |
+
+Both are M28AI's own options, with M28AI's own semantics. The addon only writes the values
+the campaign session failed to carry over; it implements no behaviour of its own.
 
 ## Requirements
 
@@ -54,17 +62,51 @@ The mod ships no units, no blueprints and no `lua/` files — only a single
 3. In the unit order panel, the alternate order slot shows an M28 "charge" icon.
 4. Click it to hand that unit to M28AI; click again to take it back.
 
-Every unit starts **not** taken over. Units built afterwards do not inherit it either, because
-`M28CAInherit` is unset and M28AI therefore treats it as `2`.
+Every unit starts **not** taken over. From the moment you take one over, everything it builds
+inherits the takeover — see below.
+
+## Contagion (v3)
+
+`M28CAInherit = 1` turns on M28AI's own inheritance rule, which is evaluated in
+`M28Events.OnConstructionStarted` — that is, at the instant a build order starts, not when it
+finishes:
+
+```lua
+if builder.M28Active and brain.BrainType == 'Human'
+   and tonumber(ScenarioInfo.Options.M28CAInherit or 2) == 1 then
+    built.M28Active = true
+    built:UpdateStat('M28Active', 1)
+end
+```
+
+Factories are builders too, so the chain works in both directions:
+
+| You take over | It builds | Result |
+|---|---|---|
+| engineer | factory | factory is taken over at the moment construction starts |
+| engineer | power plant, shield, mex… | taken over |
+| factory | tank, gunship, engineer… | taken over |
+| taken-over factory | engineer | taken over, and that engineer's own builds inherit in turn |
+| ACU (if you toggle it) | anything | taken over |
+
+Four limits worth knowing, all of them M28AI's behaviour rather than the addon's:
+
+- **No retroactivity.** Units already finished before you toggle the builder stay as they were.
+- **Start of build, not end.** A unit whose construction had already begun when you toggled the
+  builder will not inherit; the next one will.
+- **One-way.** Taking the builder back does not take its children back. Toggle them individually.
+- **Inherited units are normal taken-over units.** They can be toggled off, and M28AI controls
+  them exactly as if you had clicked them yourself.
 
 ## What it does NOT do
 
 - Does **not** set `CampAI`, so campaign allies and enemies stay on the stock campaign AI.
 - Does **not** touch skirmish or multiplayer. The value is injected only when
   `ScenarioInfo.type == 'campaign'`, and never overwrites a value that is already set.
-- Does **not** modify M28AI's source. It is a separate mod that writes one field M28AI reads.
+- Does **not** modify M28AI's source. It is a separate mod that writes two fields M28AI reads.
 - Does **not** take over anything automatically. The option enables the *button*; each unit's
-  `M28Active` flag still defaults to `0`.
+  `M28Active` flag still defaults to `0`. Inheritance only spreads from a unit you already
+  took over.
 
 ## Known log messages
 
@@ -85,6 +127,7 @@ Search `game.log` for:
 
 ```
 M28CampaignAssist: set ScenarioInfo.Options.M28CombinedArmy=1 for scenario type=campaign
+M28CampaignAssist: set ScenarioInfo.Options.M28CAInherit=1 for scenario type=campaign
 Running M28BrainCreated for brain <your player name>
 Human player brain <your player name> created; Index=...
 ```
